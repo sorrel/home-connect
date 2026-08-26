@@ -50,6 +50,88 @@ class NotAuthenticated(Exception):
     """No usable refresh token; the one-off consent has not been done."""
 
 
+class AuthorisationPending(NotAuthenticated):
+    """The device code has been issued but nobody has approved it yet.
+
+    Deliberately a subclass of `NotAuthenticated`, so anything catching the
+    broader type keeps behaving exactly as it did. Only the approval loop cares
+    about the distinction: this one means "keep waiting", where a plain
+    `NotAuthenticated` from the same call means "stop, this will never work".
+    """
+
+    def __init__(self, message: str, slow_down: bool = False) -> None:
+        super().__init__(message)
+        #: The server asked us to poll less often (OAuth `slow_down`).
+        self.slow_down = slow_down
+
+
+#: OAuth error codes we are willing to repeat back to the user. Anything else
+#: from the body is dropped rather than echoed: a response body can carry a
+#: token, and none of it is trustworthy enough to print.
+_SAFE_ERROR_CODES = frozenset({
+    "access_denied",
+    "authorization_pending",
+    "expired_token",
+    "invalid_client",
+    "invalid_grant",
+    "invalid_request",
+    "invalid_scope",
+    "slow_down",
+    "unauthorized_client",
+    "unsupported_grant_type",
+})
+
+#: Pending, not fatal: keep polling until the deadline.
+_PENDING_ERROR_CODES = frozenset({"authorization_pending", "slow_down"})
+
+_UNREADABLE = (
+    "The authorisation server's response was not understood. "
+    "Try again, and run `homeconnect auth` if it persists."
+)
+
+
+def _decode(response: Any) -> Any:
+    """Return the decoded JSON body, or fail with guidance.
+
+    A truncated, empty or non-JSON 200 is a vendor failure, not a bug here, and
+    it must not surface as a `JSONDecodeError` traceback. `ValueError` is caught
+    rather than a requests-internal type: `JSONDecodeError` subclasses it on
+    every JSON backend. The body is never quoted in the message — it can carry
+    a token.
+    """
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise NotAuthenticated(_UNREADABLE) from exc
+
+
+def _field(payload: Any, name: str) -> Any:
+    """Return `payload[name]`, or fail with guidance rather than a `KeyError`.
+
+    Only the field *name* — ours, not the server's data — reaches the message.
+    """
+    try:
+        return payload[name]
+    except (KeyError, TypeError) as exc:
+        raise NotAuthenticated(f"{_UNREADABLE} (no `{name}` field)") from exc
+
+
+def _error_code(response: Any) -> str:
+    """The OAuth `error` code from a failed response, if it is one we know.
+
+    Returns an empty string when the body is unreadable or the code is
+    unrecognised, so nothing unvetted from the body can reach the terminal.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    code = payload.get("error")
+    return code if isinstance(code, str) and code in _SAFE_ERROR_CODES else ""
+
+
 @dataclass(frozen=True)
 class Credentials:
     """Application credentials for the registered Home Connect client."""
@@ -127,11 +209,11 @@ def begin_device_authorisation(
             f"device authorisation failed: HTTP {response.status_code}"
         )
 
-    payload = response.json()
+    payload = _decode(response)
     return DeviceCode(
-        device_code=payload["device_code"],
-        user_code=payload["user_code"],
-        verification_uri=payload["verification_uri"],
+        device_code=_field(payload, "device_code"),
+        user_code=_field(payload, "user_code"),
+        verification_uri=_field(payload, "verification_uri"),
         interval=int(payload.get("interval", 5)),
         expires_in=int(payload.get("expires_in", 600)),
     )
@@ -143,7 +225,13 @@ def redeem_device_code(
     session: Any | None = None,
     keyring_module: Any | None = None,
 ) -> str:
-    """Exchange an approved device code for tokens; store and return the refresh token."""
+    """Exchange an approved device code for tokens; store and return the refresh token.
+
+    Raises `AuthorisationPending` while the person at the browser has neither
+    approved nor declined, and a plain `NotAuthenticated` for everything else —
+    a decline or an expired code is fatal and must stop the polling loop rather
+    than let it run to its deadline in silence.
+    """
     response = _session(session).post(
         TOKEN_URL,
         data={
@@ -154,9 +242,21 @@ def redeem_device_code(
         timeout=_TIMEOUT,
     )
     if response.status_code != 200:
-        raise NotAuthenticated(f"token exchange failed: HTTP {response.status_code}")
+        code = _error_code(response)
+        if code in _PENDING_ERROR_CODES:
+            raise AuthorisationPending(
+                "waiting for approval", slow_down=code == "slow_down"
+            )
+        if code == "access_denied":
+            raise NotAuthenticated("Authorisation was declined in the browser.")
+        if code == "expired_token":
+            raise NotAuthenticated("The code expired before it was approved.")
+        detail = f" ({code})" if code else ""
+        raise NotAuthenticated(
+            f"token exchange failed: HTTP {response.status_code}{detail}"
+        )
 
-    refresh_token = response.json()["refresh_token"]
+    refresh_token = _field(_decode(response), "refresh_token")
     _keyring(keyring_module).set_password(
         KEYRING_SERVICE, KEYRING_USERNAME, refresh_token
     )
@@ -194,7 +294,7 @@ def access_token(
             "Stored credential rejected. Run `homeconnect auth` again."
         )
 
-    payload = response.json()
-    if payload.get("refresh_token"):
+    payload = _decode(response)
+    if isinstance(payload, dict) and payload.get("refresh_token"):
         store.set_password(KEYRING_SERVICE, KEYRING_USERNAME, payload["refresh_token"])
-    return payload["access_token"]
+    return _field(payload, "access_token")

@@ -14,6 +14,15 @@ class FakeResponse:
         return self._payload
 
 
+class UnreadableResponse:
+    """A 200 whose body is not JSON at all — a truncated or proxied reply."""
+
+    status_code = 200
+
+    def json(self):
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+
 class FakeSession:
     def __init__(self, responses):
         self._responses = list(responses)
@@ -158,3 +167,115 @@ def test_missing_credentials_message_never_leaks_the_secret(monkeypatch):
         auth.load_credentials()
 
     assert "super-secret-value" not in str(caught.value)
+
+
+def test_begin_device_authorisation_rejects_a_non_json_200():
+    """A truncated or proxied 200 must be guidance, not a JSONDecodeError."""
+    session = FakeSession([UnreadableResponse()])
+
+    with pytest.raises(auth.NotAuthenticated) as caught:
+        auth.begin_device_authorisation(CREDENTIALS, session=session)
+
+    assert "not understood" in str(caught.value)
+
+
+def test_begin_device_authorisation_rejects_a_200_missing_a_field():
+    session = FakeSession([FakeResponse(200, {"user_code": "ABCD-EFGH"})])
+
+    with pytest.raises(auth.NotAuthenticated) as caught:
+        auth.begin_device_authorisation(CREDENTIALS, session=session)
+
+    assert "device_code" in str(caught.value)
+
+
+def test_access_token_rejects_a_non_json_200():
+    fake_keyring = FakeKeyring({(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME): "rt-1"})
+
+    with pytest.raises(auth.NotAuthenticated):
+        auth.access_token(
+            CREDENTIALS,
+            session=FakeSession([UnreadableResponse()]),
+            keyring_module=fake_keyring,
+        )
+
+
+def test_access_token_rejects_a_200_without_an_access_token():
+    fake_keyring = FakeKeyring({(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME): "rt-1"})
+
+    with pytest.raises(auth.NotAuthenticated) as caught:
+        auth.access_token(
+            CREDENTIALS,
+            session=FakeSession([FakeResponse(200, {"token_type": "Bearer"})]),
+            keyring_module=fake_keyring,
+        )
+
+    assert "access_token" in str(caught.value)
+
+
+def test_unreadable_response_message_never_leaks_the_body():
+    """The body can carry a token, so none of it may reach the terminal."""
+
+    class LeakyResponse:
+        status_code = 200
+
+        def json(self):
+            return {"unexpected": "super-secret-token-value"}
+
+    with pytest.raises(auth.NotAuthenticated) as caught:
+        auth.redeem_device_code(
+            CREDENTIALS,
+            "dev-123",
+            session=FakeSession([LeakyResponse()]),
+            keyring_module=FakeKeyring(),
+        )
+
+    assert "super-secret-token-value" not in str(caught.value)
+
+
+def test_redeem_device_code_pending_raises_authorisation_pending():
+    """Still waiting is not a failure — the loop must be able to tell."""
+    session = FakeSession([FakeResponse(400, {"error": "authorization_pending"})])
+
+    with pytest.raises(auth.AuthorisationPending) as caught:
+        auth.redeem_device_code(
+            CREDENTIALS, "dev-123", session=session, keyring_module=FakeKeyring()
+        )
+
+    assert caught.value.slow_down is False
+    # Subclassing matters: anything catching the broader type must still catch.
+    assert isinstance(caught.value, auth.NotAuthenticated)
+
+
+def test_redeem_device_code_slow_down_asks_for_a_longer_interval():
+    session = FakeSession([FakeResponse(400, {"error": "slow_down"})])
+
+    with pytest.raises(auth.AuthorisationPending) as caught:
+        auth.redeem_device_code(
+            CREDENTIALS, "dev-123", session=session, keyring_module=FakeKeyring()
+        )
+
+    assert caught.value.slow_down is True
+
+
+def test_redeem_device_code_access_denied_is_fatal_not_pending():
+    """A decline must stop the loop, not be mistaken for "not approved yet"."""
+    session = FakeSession([FakeResponse(400, {"error": "access_denied"})])
+
+    with pytest.raises(auth.NotAuthenticated) as caught:
+        auth.redeem_device_code(
+            CREDENTIALS, "dev-123", session=session, keyring_module=FakeKeyring()
+        )
+
+    assert not isinstance(caught.value, auth.AuthorisationPending)
+    assert "declined" in str(caught.value)
+
+
+def test_redeem_device_code_expired_token_is_fatal_not_pending():
+    session = FakeSession([FakeResponse(400, {"error": "expired_token"})])
+
+    with pytest.raises(auth.NotAuthenticated) as caught:
+        auth.redeem_device_code(
+            CREDENTIALS, "dev-123", session=session, keyring_module=FakeKeyring()
+        )
+
+    assert not isinstance(caught.value, auth.AuthorisationPending)
