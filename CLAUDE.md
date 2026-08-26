@@ -168,3 +168,16 @@ uv run pytest
 Fixtures live under `tests/fixtures/` (recorded appliance list, idle status,
 and an idle `/programs/active` response); other states used in the tests are
 built inline as dataclasses. No network access happens in the suite.
+
+### Why the launchd agent execs `uv` directly
+
+`ProgramArguments` invokes the resolved `uv` binary with no shell in between.
+An earlier version used `/bin/sh -lc` so that a login shell would put `uv` on
+the `PATH`. That is unnecessary now that `install.sh` resolves `uv`'s absolute
+path at install time, and it was actively harmful: a login `/bin/sh` sources
+the user's profile, and any profile line using bash or zsh syntax that POSIX
+`sh` cannot parse — RVM's hook, for instance — writes a syntax error into
+`recorder.err` on every start. The recorder still ran, but its error log opened
+with a failure that had nothing to do with it, which is exactly the noise you
+do not want in the first place anyone looks when something is wrong.
+

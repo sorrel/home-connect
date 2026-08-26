@@ -7,9 +7,9 @@
   <string>com.homeconnect.recorder</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/bin/sh</string>
-    <string>-lc</string>
-    <string>cd __REPO__ &amp;&amp; exec __UV__ run homeconnect-recorder</string>
+    <string>__UV__</string>
+    <string>run</string>
+    <string>homeconnect-recorder</string>
   </array>
   <key>WorkingDirectory</key>
   <string>__REPO__</string>
