@@ -58,6 +58,12 @@ def cycles(records: list[dict]) -> list[Cycle]:
             continue
 
         if record.get("to") == RUNNING:
+            if label in open_cycles:
+                # A new run started before the previous one was seen to end —
+                # expected after a coverage gap, not corruption. Flush the
+                # stale one as unfinished rather than silently dropping it.
+                stale = open_cycles.pop(label)
+                found.append(Cycle(label, stale["started"], None, stale["programme"]))
             open_cycles[label] = {"started": record["ts"], "programme": None}
         elif label in open_cycles and record.get("to") in FINISHED_STATES:
             started = open_cycles.pop(label)
