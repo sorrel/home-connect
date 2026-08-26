@@ -372,3 +372,39 @@ def test_unknown_command_suggests_a_similar_one():
     result = CliRunner().invoke(cli_module.cli, ["histry"])
     assert result.exit_code != 0
     assert "history" in result.output
+
+
+def test_bare_help_lists_all_subcommands():
+    result = CliRunner().invoke(cli_module.cli, ["--help"])
+
+    assert result.exit_code == 0
+    assert "Commands" in result.output
+    for name in ("auth", "history", "help"):
+        assert name in result.output
+
+
+def test_bare_help_option_descriptions_are_aligned():
+    import re
+
+    result = CliRunner().invoke(cli_module.cli, ["--help"])
+    stripped = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+
+    option_lines = [
+        line for line in stripped.splitlines()
+        if line.strip().startswith("-")
+    ]
+    assert len(option_lines) >= 2
+
+    from homeconnect.present import display_width
+
+    columns = set()
+    for line in option_lines:
+        indent = len(line) - len(line.lstrip())
+        remainder = line[indent:]
+        # Find where the run of at least two spaces separating the option
+        # name from its description begins.
+        match = re.search(r"  +", remainder)
+        assert match, f"no description column found in: {line!r}"
+        columns.add(indent + display_width(remainder[: match.end()]))
+
+    assert len(columns) == 1, f"option descriptions are ragged: {columns}"

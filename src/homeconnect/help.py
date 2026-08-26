@@ -213,12 +213,23 @@ class ColouredGroup(click.Group):
             return
 
         formatter.write_paragraph()
-        formatter.write_text(click.style("Options:", fg="yellow", bold=True))
-        with formatter.indentation():
-            for name, description in records:
-                formatter.write_text(
-                    click.style(name, fg="green") + "  " + click.style(description, fg="white", dim=True)
-                )
+        formatter.write(click.style("Options:", fg="yellow", bold=True) + "\n")
+        # Written with formatter.write() (raw, unwrapped) rather than
+        # write_text(): write_text runs Click's own textwrap over the line,
+        # which counts embedded ANSI escape codes as display characters and
+        # wraps in the wrong place, breaking the padded column entirely.
+        longest = max(display_width(name) for name, _ in records)
+        for name, description in records:
+            padding = longest - display_width(name) + 2
+            formatter.write(
+                "  " + click.style(name, fg="green") + " " * padding
+                + click.style(description, fg="white", dim=True) + "\n"
+            )
+
+        # Click's own MultiCommand.format_options chains into format_commands
+        # after writing the options; not doing so here made the whole
+        # "Commands:" section vanish from `--help`.
+        self.format_commands(ctx, formatter)
 
     def format_commands(self, ctx, formatter):
         commands = []
@@ -232,15 +243,18 @@ class ColouredGroup(click.Group):
             return
 
         formatter.write_paragraph()
-        formatter.write_text(click.style("Commands:", fg="yellow", bold=True))
+        formatter.write(click.style("Commands:", fg="yellow", bold=True) + "\n")
 
+        # Raw formatter.write(), not write_text(): see the comment in
+        # format_options() above — write_text's textwrap miscounts ANSI
+        # escape codes and wraps padded columns in the wrong place.
         longest = max(display_width(name) for name, _ in commands)
-        with formatter.indentation():
-            for name, description in commands:
-                padding = longest - display_width(name) + 2
-                formatter.write_text(
-                    click.style(name, fg="green") + " " * padding + click.style(description, fg="white", dim=True)
-                )
+        for name, description in commands:
+            padding = longest - display_width(name) + 2
+            formatter.write(
+                "  " + click.style(name, fg="green") + " " * padding
+                + click.style(description, fg="white", dim=True) + "\n"
+            )
 
 
 @click.command(name="help")
