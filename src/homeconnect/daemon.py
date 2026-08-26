@@ -2,8 +2,10 @@
 
 The vendor's stream reports changes only and sends nothing on connect, so the
 recorder must poll once to establish a baseline before it has anything to diff
-against. It then holds the stream, and polls again hourly to re-establish ground
-truth — cheap insurance against a missed event or a silent disconnection.
+against. It then holds the stream, and `stream_once` itself ends the connection
+and returns `"reconcile"` once `RECONCILE_SECONDS` has elapsed, so the next loop
+iteration polls again and re-establishes ground truth — cheap insurance against
+a missed event or a silent disconnection.
 
 Every function that matters takes its dependencies as arguments, so the tests
 drive all of it without a network, a Keychain, or a data directory.
@@ -21,10 +23,17 @@ from . import appliances as appliances_module
 from . import auth
 from . import store
 from . import stream
-from .api import BASE_URL, Client, HomeConnectError
+from .api import BASE_URL, Client, HomeConnectError, NotAuthorised
 
 #: Poll again this often even while the stream looks healthy.
 RECONCILE_SECONDS = 3600
+
+#: Below this, an interruption is not worth a `coverage_gap` marker. Every
+#: state this log tracks changes on the scale of hours (a wash cycle, a door
+#: left open), so a blind spot shorter than this cannot hide a genuine
+#: transition — recording it anyway would flood the log with reconnects that
+#: nobody needs to read.
+GAP_THRESHOLD_SECONDS = 120
 
 #: Vendor namespaces whose enum values are reduced to their final segment.
 #: Deliberately a fixed list, not "any dotted string" — a value like "1.5"
@@ -153,6 +162,40 @@ def record_gap(
     store.append_record(store.gap_record(now(), since, reason), events_path)
 
 
+class AuthenticationExhausted(Exception):
+    """Two consecutive authentication failures within `run()`.
+
+    A single 401 is ordinary — tokens expire — and is handled by invalidating
+    the cached token so the next cycle mints a fresh one. A *second* failure
+    right after that means refreshing did not help, so the process exits
+    non-zero instead of looping forever: `NotAuthorised` and an HTTP 401 are
+    both caught inside the loop and neither would otherwise stop it, which
+    would leave a recorder running for weeks writing only gap markers while
+    launchd sees a healthy, long-lived process and never restarts it.
+    """
+
+
+class TokenHolder:
+    """A refreshable, invalidatable access token cache.
+
+    Injectable so `run()` can force a refresh after an authentication failure
+    without touching the real Keychain, and so tests can see how often the
+    underlying fetch actually ran.
+    """
+
+    def __init__(self, fetch: Callable[[], str]) -> None:
+        self._fetch = fetch
+        self._token: str | None = None
+
+    def get(self) -> str:
+        if self._token is None:
+            self._token = self._fetch()
+        return self._token
+
+    def invalidate(self) -> None:
+        self._token = None
+
+
 def stream_once(
     session: Any,
     url: str,
@@ -161,8 +204,26 @@ def stream_once(
     labels: dict[str, str],
     events_path=store.EVENTS_PATH,
     now: Callable[[], str] = store.utc_now,
+    state_path=store.STATE_PATH,
+    clock: Callable[[], float] = time.monotonic,
+    on_unknown_haid: Callable[[], None] | None = None,
 ) -> str:
-    """Consume one stream connection until it ends. Returns why it ended."""
+    """Consume one stream connection until it ends. Returns why it ended.
+
+    Three outcomes: the connection closed (`"stream_ended"`), the server
+    rejected it (`"http_<code>"`), or `RECONCILE_SECONDS` elapsed without
+    either (`"reconcile"`) — the hourly re-poll the module docstring
+    promises, so a quiet-but-alive stream is never mistaken for a dead one
+    via the socket read timeout alone.
+
+    An event naming an haId absent from `labels` is skipped rather than
+    filed under a fallback label: a pseudo-appliance would be written to
+    state, would not appear in the next poll's `observe()`, and every one of
+    its keys would then be logged as transitioning to `None` — a fabricated
+    pair of transitions for a device this recorder never actually
+    identified. `on_unknown_haid`, if given, is called once per skipped
+    event so a caller can count them.
+    """
     response = session.get(
         url,
         headers={"Authorization": f"Bearer {token}", "Accept": "text/event-stream"},
@@ -172,15 +233,27 @@ def stream_once(
     if getattr(response, "status_code", 200) != 200:
         return f"http_{response.status_code}"
 
+    deadline = clock() + RECONCILE_SECONDS
     with response:
         for event in stream.parse_sse(response.iter_lines(decode_unicode=True)):
-            if event["event"] == "KEEP-ALIVE" or not event["data"]:
-                continue
-            payload = event["data"]
-            label = labels.get(str(payload.get("haId", "")), "appliance")
-            apply_event(
-                state, label, stream.extract_changes(payload), events_path, now
-            )
+            if event["event"] != "KEEP-ALIVE" and event["data"]:
+                payload = event["data"]
+                label = labels.get(str(payload.get("haId", "")))
+                if label is None:
+                    if on_unknown_haid is not None:
+                        on_unknown_haid()
+                else:
+                    apply_event(
+                        state, label, stream.extract_changes(payload),
+                        events_path, now,
+                    )
+                    # Saved after every batch, not just between cycles: a
+                    # kill mid-stream must not leave state.json describing an
+                    # hour-old snapshot that re-logs already-recorded
+                    # transitions the next time it is diffed against reality.
+                    store.save_state(state, state_path)
+            if clock() >= deadline:
+                return "reconcile"
     return "stream_ended"
 
 
@@ -191,26 +264,47 @@ def run(
     state_path=store.STATE_PATH,
     sleep: Callable[[float], None] = time.sleep,
     delays: Any = None,
+    delays_factory: Callable[[], Any] = stream.backoff_delays,
     iterations: int | None = None,
     now: Callable[[], str] = store.utc_now,
-    token_provider: Callable[[], str] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    token_holder: TokenHolder | None = None,
 ) -> None:
-    """Seed, listen, reconcile, and mark every gap. Loops until `iterations`.
+    """Seed, listen, reconcile, and mark every gap that matters. Loops until
+    `iterations`.
 
     `iterations=None` means forever. Tests pass a finite count; nothing else
     about the loop differs between test and production, because a loop that only
     runs in a special mode is not a loop anybody has tested.
+
+    A `coverage_gap` marker brackets a real interruption: the moment
+    watching stops (`coverage_lost_at`, stamped when `stream_once` returns
+    anything but `"reconcile"`, or when an exception is caught) to the moment
+    it resumes (the next successful poll). It is written only if that span
+    exceeded `GAP_THRESHOLD_SECONDS` — `clock()` (monotonic, independent of
+    `now()`'s wall-clock stamps) measures the span so a fake `now()` in tests
+    cannot distort it. A `"reconcile"` ending is a deliberate, healthy
+    reconnection and never starts a gap.
+
+    Raises `AuthenticationExhausted` after two consecutive authentication
+    failures, so `main()` can exit non-zero and let launchd restart the
+    process with a fresh attempt rather than let it run indefinitely on a
+    token that cannot be refreshed.
     """
     if delays is None:
-        delays = stream.backoff_delays()
+        delays = delays_factory()
 
     state = store.load_state(state_path)
     if not state:
         record_gap(None, "startup", events_path, now)
 
+    coverage_lost_at: str | None = None
+    coverage_lost_since: float | None = None
+    consecutive_auth_failures = 0
+
     completed = 0
     while iterations is None or completed < iterations:
-        last_good = now()
+        healthy_stream = False
         try:
             client = build_client()
             found = appliances_module.list_appliances(client)
@@ -222,21 +316,82 @@ def run(
             state = observed
             store.save_state(state, state_path)
 
-            token = token_provider() if token_provider else ""
+            # This poll succeeded, so any tracked interruption ends here.
+            if coverage_lost_at is not None:
+                if (clock() - coverage_lost_since) >= GAP_THRESHOLD_SECONDS:
+                    store.append_record(
+                        store.gap_record(now(), coverage_lost_at, "recovered"),
+                        events_path,
+                    )
+                coverage_lost_at = None
+                coverage_lost_since = None
+
+            token = token_holder.get() if token_holder else ""
             reason = stream_once(
                 session_factory(), f"{BASE_URL}{stream.EVENTS_PATH_SUFFIX}",
-                token, state, labels, events_path, now,
+                token, state, labels, events_path, now, state_path=state_path,
             )
-        except HomeConnectError as exc:
+
+            if reason == "http_401":
+                consecutive_auth_failures += 1
+                if token_holder:
+                    token_holder.invalidate()
+            else:
+                consecutive_auth_failures = 0
+
+            if reason == "reconcile":
+                healthy_stream = True
+            else:
+                healthy_stream = reason == "stream_ended"
+                if coverage_lost_at is None:
+                    coverage_lost_at = now()
+                    coverage_lost_since = clock()
+        except NotAuthorised:
+            consecutive_auth_failures += 1
+            if token_holder:
+                token_holder.invalidate()
+            reason = "api_error:NotAuthorised"
+            if coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_since = clock()
+        except auth.NotAuthenticated as exc:
+            # Not a HomeConnectError — raised by auth.access_token() when the
+            # stored refresh token itself is no good, which is exactly the
+            # same authentication-failure situation as a 401 from the API.
+            consecutive_auth_failures += 1
+            if token_holder:
+                token_holder.invalidate()
             reason = f"api_error:{type(exc).__name__}"
+            if coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_since = clock()
+        except HomeConnectError as exc:
+            consecutive_auth_failures = 0
+            reason = f"api_error:{type(exc).__name__}"
+            if coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_since = clock()
         except requests.RequestException:
+            consecutive_auth_failures = 0
             reason = "network_error"
+            if coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_since = clock()
+
+        if consecutive_auth_failures >= 2:
+            raise AuthenticationExhausted(
+                "two consecutive authentication failures; refreshing did not help"
+            )
 
         store.save_state(state, state_path)
-        record_gap(last_good, reason, events_path, now)
 
         completed += 1
         if iterations is None or completed < iterations:
+            if healthy_stream:
+                # A cycle that streamed successfully earns a clean slate: an
+                # already-advanced backoff must not punish a recorder that
+                # just proved the connection is fine.
+                delays = delays_factory()
             sleep(next(delays))
 
 
@@ -248,23 +403,21 @@ def main() -> int:
         print(f"{exc}", file=sys.stderr)
         return 2
 
-    cached: list[str] = []
-
-    def token_provider() -> str:
-        if not cached:
-            cached.append(auth.access_token(credentials))
-        return cached[0]
+    token_holder = TokenHolder(lambda: auth.access_token(credentials))
 
     try:
         with store.single_instance_lock():
             run(
-                build_client=lambda: Client(token_provider=token_provider),
+                build_client=lambda: Client(token_provider=token_holder.get),
                 session_factory=requests.Session,
-                token_provider=token_provider,
+                token_holder=token_holder,
             )
     except store.AlreadyRunning as exc:
         print(f"{exc}", file=sys.stderr)
         return 3
+    except AuthenticationExhausted as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 4
     except KeyboardInterrupt:
         return 0
     return 0
