@@ -50,20 +50,35 @@ def _flatten(entries: Any) -> dict[str, Any]:
 
 
 def list_appliances(client: Any) -> list[Appliance]:
-    """Enumerate every appliance on the account."""
+    """Enumerate every appliance on the account.
+
+    A record without an `haId` is skipped rather than raising: nothing can be
+    fetched for an appliance that cannot be addressed, and a `KeyError` here
+    would escape the recorder's run loop and stop it dead over one malformed
+    entry in a list of otherwise usable ones.
+    """
     payload = client.get("/homeappliances") or {}
-    return [
-        Appliance(
-            ha_id=record["haId"],
-            name=record.get("name", record["haId"]),
+    entries = payload.get("homeappliances")
+    if not isinstance(entries, list):
+        return []
+
+    found: list[Appliance] = []
+    for record in entries:
+        if not isinstance(record, dict):
+            continue
+        ha_id = record.get("haId")
+        if not ha_id:
+            continue
+        found.append(Appliance(
+            ha_id=ha_id,
+            name=record.get("name", ha_id),
             type=record.get("type", "Unknown"),
             brand=record.get("brand", ""),
             vib=record.get("vib", ""),
             enumber=record.get("enumber", ""),
             connected=bool(record.get("connected", False)),
-        )
-        for record in payload.get("homeappliances", [])
-    ]
+        ))
+    return found
 
 
 def fetch_state(client: Any, appliance: Appliance) -> ApplianceState:

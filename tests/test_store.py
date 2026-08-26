@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -154,3 +155,56 @@ def test_single_instance_lock_releases_on_exit(tmp_path):
         pass
     with store.single_instance_lock(path):
         pass
+
+
+# --- Where the data lives --------------------------------------------------
+
+def test_default_data_dir_is_anchored_to_the_repository_not_the_cwd(monkeypatch):
+    """`homeconnect history` run from elsewhere must not report an empty log.
+
+    Resolved from `data`, a report run from any other directory finds nothing
+    and says "No events recorded yet. Is the recorder running?" — which is
+    indistinguishable from a recorder that has genuinely died.
+    """
+    monkeypatch.delenv("HOMECONNECT_DATA_DIR", raising=False)
+
+    found = store.default_data_dir()
+
+    assert found.is_absolute()
+    assert found.name == "data"
+    assert found.parent == Path(store.__file__).resolve().parents[2]
+
+
+def test_data_dir_can_be_overridden_by_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOMECONNECT_DATA_DIR", str(tmp_path / "elsewhere"))
+
+    assert store.default_data_dir() == tmp_path / "elsewhere"
+
+
+def test_data_dir_override_expands_a_home_relative_path(monkeypatch):
+    monkeypatch.setenv("HOMECONNECT_DATA_DIR", "~/home-connect-data")
+
+    found = store.default_data_dir()
+
+    assert found.is_absolute()
+    assert "~" not in str(found)
+
+
+# --- Wall-clock spans ------------------------------------------------------
+
+def test_elapsed_seconds_measures_a_span_between_two_stamps():
+    assert store.elapsed_seconds(
+        "2026-08-26T19:00:00Z", "2026-08-27T03:00:00Z"
+    ) == 8 * 3600
+
+
+def test_elapsed_seconds_is_none_for_an_unreadable_stamp():
+    assert store.elapsed_seconds("not a stamp", "2026-08-26T19:00:00Z") is None
+    assert store.elapsed_seconds("2026-08-26T19:00:00Z", None) is None
+
+
+def test_parse_stamp_round_trips_utc_now():
+    parsed = store.parse_stamp(store.utc_now())
+
+    assert parsed is not None
+    assert parsed.tzinfo is not None, "a naive stamp would compare wrongly"

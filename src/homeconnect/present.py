@@ -28,9 +28,9 @@ PROGRAMME_NAMES = {
 
 # Deliberately absent: salt, rinse aid and machine-care reporting. Those values
 # are not status keys — the API returns SDK.Error.UnsupportedStatus for each —
-# and exist only as SSE events on a change-only stream. Reporting them needs a
-# process that is already listening, which this tool is not. See the spec's
-# findings section before attempting to add them here.
+# and exist only as SSE events on a change-only stream, so an on-demand render
+# of a single fetch cannot show them. They are reported by `homeconnect
+# history` instead, from what the recorder observed while it was listening.
 
 
 def display_width(text: str) -> int:

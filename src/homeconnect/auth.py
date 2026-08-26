@@ -21,6 +21,17 @@ from typing import Any
 
 import requests
 from dotenv import load_dotenv
+from keyring.errors import KeyringError  # noqa: F401  (re-exported)
+
+#: Re-exported deliberately. A locked, denied or reprompting Keychain raises
+#: this, and both the CLI and the recorder must catch it to turn it into
+#: guidance rather than a traceback. Re-exporting it here means neither of
+#: them has to import `keyring` itself just to name the failure.
+__all__ = [
+    "AuthorisationPending", "Credentials", "DeviceCode", "KeyringError",
+    "MissingCredentials", "NotAuthenticated", "SCOPE", "access_token",
+    "begin_device_authorisation", "load_credentials", "redeem_device_code",
+]
 
 DEVICE_AUTHORISATION_URL = (
     "https://api.home-connect.com/security/oauth/device_authorization"
@@ -263,6 +274,19 @@ def redeem_device_code(
     return refresh_token
 
 
+def _refresh(http: Any, credentials: Credentials, refresh_token: str) -> Any:
+    """POST one refresh-token grant. The token is never logged or formatted."""
+    return http.post(
+        TOKEN_URL,
+        data={
+            **credentials.as_form(),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        timeout=_TIMEOUT,
+    )
+
+
 def access_token(
     credentials: Credentials,
     session: Any | None = None,
@@ -274,24 +298,30 @@ def access_token(
     old one, so the replacement must be written back or the next run will fail.
     A response that omits one leaves the stored token untouched — blanking it
     would strand the tool with no way back except re-consent.
+
+    Because the CLI and the recorder share the one Keychain entry, they can
+    refresh at the same moment: whichever loses the race presents a token the
+    other has just had invalidated. That is a lost race, not a lost
+    credential, so a rejection is retried once against a freshly read stored
+    token — by then the winner has written its replacement — before anybody is
+    sent back to the browser for a needless re-consent.
     """
     store = _keyring(keyring_module)
+    http = _session(session)
     refresh_token = store.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
     if not refresh_token:
         raise NotAuthenticated("Not authenticated. Run `homeconnect auth` first.")
 
-    response = _session(session).post(
-        TOKEN_URL,
-        data={
-            **credentials.as_form(),
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        },
-        timeout=_TIMEOUT,
-    )
+    response = _refresh(http, credentials, refresh_token)
+    if response.status_code != 200:
+        current = store.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
+        if current and current != refresh_token:
+            response = _refresh(http, credentials, current)
     if response.status_code != 200:
         raise NotAuthenticated(
-            "Stored credential rejected. Run `homeconnect auth` again."
+            "The stored credential was rejected. It may have been rotated by "
+            "another process — try again. If it keeps failing, run "
+            "`homeconnect auth`."
         )
 
     payload = _decode(response)

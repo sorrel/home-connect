@@ -1,5 +1,3 @@
-import pytest
-
 from homeconnect import appliances
 from homeconnect.api import NoProgrammeActive
 
@@ -135,3 +133,26 @@ def test_fetch_state_skips_calls_for_offline_appliance():
 
     assert state.status == {}
     assert state.programme is None
+
+
+def test_a_record_without_an_haid_is_skipped_not_fatal():
+    """A malformed entry must not stop the recorder's whole run loop."""
+    class FakeClient:
+        def get(self, path):
+            return {"homeappliances": [
+                {"name": "Nameless"},
+                {"haId": "000000000000000000", "name": "Dishwasher",
+                 "type": "Dishwasher", "connected": True},
+            ]}
+
+    found = appliances.list_appliances(FakeClient())
+
+    assert [a.name for a in found] == ["Dishwasher"]
+
+
+def test_a_non_list_payload_yields_no_appliances():
+    class FakeClient:
+        def get(self, path):
+            return {"homeappliances": None}
+
+    assert appliances.list_appliances(FakeClient()) == []

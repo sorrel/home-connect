@@ -408,3 +408,28 @@ def test_bare_help_option_descriptions_are_aligned():
         columns.add(indent + display_width(remainder[: match.end()]))
 
     assert len(columns) == 1, f"option descriptions are ragged: {columns}"
+
+
+def test_locked_keychain_gives_guidance_not_a_traceback(monkeypatch):
+    """A locked, denied or reprompting Keychain must not print a traceback."""
+    patch_backend(monkeypatch)
+
+    def raise_keyring_error(creds):
+        raise cli_module.auth.KeyringError("the Keychain is locked")
+
+    # Driven through the token provider, as it is in life: the token is
+    # fetched lazily when a request is first issued, so a test that never
+    # issues one would pass for the wrong reason.
+    monkeypatch.setattr(cli_module.auth, "access_token", raise_keyring_error)
+    monkeypatch.setattr(
+        cli_module.api, "Client", lambda **kwargs: kwargs["token_provider"]
+    )
+    monkeypatch.setattr(
+        cli_module.appliances, "list_appliances", lambda provider: provider()
+    )
+
+    result = CliRunner().invoke(cli_module.cli, [])
+
+    assert result.exit_code != 0
+    assert "Keychain" in result.output
+    assert "Traceback" not in result.output

@@ -40,6 +40,21 @@ full design record, including the live-probe findings that shaped it.
   `ok`. Do not "fix" a gap-heavy report by loosening this — an uneventful
   hour and an unwatched hour must never be allowed to look the same in the
   log or in what `homeconnect history` prints.
+- **Some keys can only ever arrive on the stream.** `store.EVENT_ONLY_KEYS`
+  names them: the three consumables and `SelectedProgramme`. A poll cannot
+  read any of them, so `daemon.observe()` carries them forward from
+  last-known state instead of rebuilding them. Removing that carry-forward
+  reintroduces the worst bug this codebase has had — an hourly poll writing
+  `SaltNearlyEmpty: "Present" -> null`, which the report reads as `ok`.
+- **One concept, one name in the log.** The poll writes `Programme`; the
+  stream says `ActiveProgram`. `daemon._STREAM_KEY_ALIASES` folds stream keys
+  onto the poll's namespace as events are applied. Anything added to one
+  source's vocabulary must be reconciled with the other's.
+- **Gap lengths are measured on the wall clock, never `time.monotonic()`.**
+  On macOS the monotonic clock is `CLOCK_UPTIME_RAW` and does not advance
+  while the machine sleeps, so it measures an overnight sleep as seconds —
+  and this recorder runs on a laptop that sleeps. See
+  `store.elapsed_seconds`.
 - **The event log is unrebuildable and never auto-deleted.**
   `data/events.jsonl` has no source of truth to rebuild from — the vendor
   API exposes no history. Nothing in this codebase, including
@@ -73,7 +88,8 @@ src/homeconnect/
   stream.py       SSE line parsing and reconnection-backoff timing; opens no
                   connection itself
   store.py        append-only `events.jsonl`, `state.json`, and the advisory
-                  single-instance lock, all under `data/`
+                  single-instance lock, all under `data/` — anchored to the
+                  repository root, or `HOMECONNECT_DATA_DIR` if set
   daemon.py       the recorder loop: seed, listen, reconcile, mark gaps;
                   the `homeconnect-recorder` console-script entry point
   report.py       turns the event log into answers (`homeconnect history`),

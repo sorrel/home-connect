@@ -83,10 +83,15 @@ launchd/install.sh      # install and start
 launchd/uninstall.sh    # stop and remove
 ```
 
+`homeconnect history` prints the cycles observed (the ten most recent, and it
+says so when there are more), the believed state of salt, rinse aid and machine
+care, and the coverage gaps that qualify both.
+
 ## Data
 
 Everything stays local. `data/` holds the event log and last-known state, and is
-gitignored. Credentials are never written to disk by this tool: the client ID
+gitignored. It sits beside this README regardless of where you run the commands
+from; set `HOMECONNECT_DATA_DIR` to keep it somewhere else. Credentials are never written to disk by this tool: the client ID
 and secret come from the environment, and the refresh token lives in the
 Keychain.
 

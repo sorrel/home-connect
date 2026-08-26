@@ -130,3 +130,45 @@ def test_render_trusts_a_consumable_reported_after_the_last_gap():
     salt_line = next(line for line in text.splitlines()
                       if line.strip().startswith("SaltNearlyEmpty"))
     assert salt_line.split()[1] == "ok"
+
+
+def test_a_programme_named_in_the_same_batch_as_the_start_is_attached():
+    """The stream may name the programme either side of the state change.
+
+    A poll always writes OperationState before Programme; the stream sends
+    whatever order the vendor chose, and the pair then share a timestamp.
+    """
+    found = report.cycles([PROG, RUN, FINISHED])
+
+    assert found[0].programme == "Eco50"
+
+
+def test_a_programme_named_at_an_earlier_instant_is_not_attributed():
+    """Attributing an older programme to a later run would be a guess."""
+    earlier = dict(PROG, ts="2026-08-26T10:00:00Z")
+
+    found = report.cycles([earlier, RUN, FINISHED])
+
+    assert found[0].programme is None
+
+
+def test_render_says_when_it_is_showing_only_the_most_recent_cycles():
+    records = []
+    for hour in range(12):
+        records.append(dict(RUN, ts=f"2026-08-2{hour // 6}T{hour:02d}:00:00Z"))
+        records.append(dict(FINISHED, ts=f"2026-08-2{hour // 6}T{hour:02d}:30:00Z"))
+
+    output = report.render(records)
+
+    assert "Cycles: 12" in output
+    assert "showing the 10 most recent" in output
+
+
+def test_render_does_not_claim_truncation_when_it_shows_everything():
+    assert "most recent" not in report.render([RUN, FINISHED])
+
+
+def test_every_consumable_key_is_one_the_recorder_carries_across_a_poll():
+    from homeconnect import store
+
+    assert set(report.CONSUMABLE_KEYS) <= set(store.EVENT_ONLY_KEYS)

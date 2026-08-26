@@ -1,11 +1,13 @@
 import contextlib
-import itertools
-import json
+import os
+import time
+from datetime import datetime, timedelta
 
 import pytest
+import requests
 
-from homeconnect import daemon, store
-from homeconnect.api import NoProgrammeActive
+from homeconnect import auth, daemon, report, store
+from homeconnect.api import NoProgrammeActive, QuotaExceeded
 from homeconnect.appliances import Appliance
 
 
@@ -236,6 +238,10 @@ class FakeStreamResponse:
     def __init__(self, lines, status_code=200):
         self.status_code = status_code
         self._lines = list(lines)
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
     def iter_lines(self, decode_unicode=False):
         yield from self._lines
@@ -275,6 +281,32 @@ def test_stream_once_folds_events_into_state(tmp_path):
     assert reason == "stream_ended"
 
 
+class _SilentStreamSession:
+    """A session whose stream connects, says nothing, and closes."""
+
+    def get(self, *args, **kwargs):
+        return FakeStreamResponse([])
+
+
+def _stamps(step_seconds=100, start="2026-08-26T19:00:00Z"):
+    """A fake `now()` whose wall clock advances by a fixed step per call.
+
+    Gap lengths are measured on the wall clock from these very stamps, so a
+    test that wants a long or a short interruption says so here rather than
+    by manipulating a monotonic clock that, on a sleeping Mac, would not have
+    advanced at all.
+    """
+    moment = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ")
+
+    def now() -> str:
+        nonlocal moment
+        stamp = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+        moment += timedelta(seconds=step_seconds)
+        return stamp
+
+    return now
+
+
 def _dishwasher_client():
     return FakeClient({
         "/homeappliances": {"homeappliances": [{
@@ -298,10 +330,9 @@ def test_run_marks_a_gap_that_brackets_a_real_interruption(tmp_path, monkeypatch
 
     monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: "stream_ended")
 
-    # 0.0 at the moment coverage is lost, 200.0 at the next successful poll —
-    # a 200-second interruption, comfortably past GAP_THRESHOLD_SECONDS (120).
-    clock_values = itertools.chain([0.0, 200.0], itertools.count(1000.0, 1000.0))
-
+    # Coverage is lost at 19:00:00 and the next successful poll is at
+    # 19:05:00 — a five-minute interruption on the wall clock, comfortably
+    # past GAP_THRESHOLD_SECONDS (120).
     daemon.run(
         build_client=_dishwasher_client,
         session_factory=lambda: None,
@@ -309,14 +340,14 @@ def test_run_marks_a_gap_that_brackets_a_real_interruption(tmp_path, monkeypatch
         state_path=state_path,
         sleep=slept.append,
         delays_factory=lambda: iter([5.0, 5.0, 5.0]),
-        clock=lambda: next(clock_values),
+        now=_stamps(step_seconds=100),
         iterations=2,
     )
 
     records, _ = store.read_records(events_path)
     recovered = [
         r for r in records
-        if r.get("event") == "coverage_gap" and r.get("reason") == "recovered"
+        if r.get("event") == "coverage_gap" and r.get("reason") == "stream_lost"
     ]
     assert len(recovered) == 1, "one bracketed gap, not one per cycle"
     assert recovered[0]["from"] is not None
@@ -329,9 +360,8 @@ def test_run_does_not_mark_a_gap_for_a_brief_interruption(tmp_path, monkeypatch)
 
     monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: "stream_ended")
 
-    # 0.0 then 50.0 — a 50-second interruption, under the 120-second threshold.
-    clock_values = itertools.chain([0.0, 50.0], itertools.count(1000.0, 1000.0))
-
+    # Ten seconds per call, so the interruption spans well under the
+    # 120-second threshold on the wall clock.
     daemon.run(
         build_client=_dishwasher_client,
         session_factory=lambda: None,
@@ -339,14 +369,14 @@ def test_run_does_not_mark_a_gap_for_a_brief_interruption(tmp_path, monkeypatch)
         state_path=state_path,
         sleep=lambda _: None,
         delays=iter([0.0] * 10),
-        clock=lambda: next(clock_values),
+        now=_stamps(step_seconds=10),
         iterations=2,
     )
 
     records, _ = store.read_records(events_path)
     recovered = [
         r for r in records
-        if r.get("event") == "coverage_gap" and r.get("reason") == "recovered"
+        if r.get("event") == "coverage_gap" and r.get("reason") != "startup"
     ]
     assert recovered == [], "a two-minute blind spot cannot hide an hours-scale change"
 
@@ -785,3 +815,297 @@ def test_run_persists_state_between_iterations(tmp_path):
     records, _ = store.read_records(events_path)
     transitions = [r for r in records if r.get("key") == "OperationState"]
     assert len(transitions) == 1, "the same state must not be logged twice"
+
+
+# --- Keys that only the stream can ever report -----------------------------
+
+SALT_EVENT = [(
+    "Dishcare.Dishwasher.Event.SaltNearlyEmpty",
+    "BSH.Common.EnumType.EventPresentState.Present",
+)]
+
+
+def test_observe_carries_event_only_keys_forward_for_a_connected_appliance():
+    """A poll cannot report salt, so a poll must not appear to deny it."""
+    client = _dishwasher_client()
+    previous = {"dishwasher": {"SaltNearlyEmpty": "Present"}}
+
+    observed = daemon.observe(client, previous=previous)
+
+    assert observed["dishwasher"]["SaltNearlyEmpty"] == "Present"
+    assert observed["dishwasher"]["Connected"] is True
+
+
+def test_a_salt_warning_survives_the_next_reconciliation_poll(tmp_path):
+    """The whole sequence, because this is the failure that mattered most.
+
+    A salt event arrives on the stream; an hour later the hourly
+    reconciliation poll rebuilds state from `/status`, which cannot report
+    salt at all. Before the fix that wrote `SaltNearlyEmpty: "Present" ->
+    null`, and `report.consumables` read the absence of "Present" as `ok` —
+    the recorder's entire purpose failing in the dangerous direction, in a log
+    that cannot be rebuilt.
+    """
+    events_path = tmp_path / "events.jsonl"
+    client = _dishwasher_client()
+
+    state = daemon.observe(client)
+    daemon.apply_event(
+        state, "dishwasher", SALT_EVENT, events_path,
+        now=lambda: "2026-08-26T19:00:00Z",
+    )
+
+    observed = daemon.observe(client, previous=state)
+    daemon.record_changes(
+        state, observed, events_path, now=lambda: "2026-08-26T20:00:00Z"
+    )
+
+    records, _ = store.read_records(events_path)
+    salt = next(c for c in report.consumables(records) if c.name == "SaltNearlyEmpty")
+    assert salt.state == "low", "a poll that cannot see salt must not clear it"
+    assert not [
+        r for r in records
+        if r.get("key") == "SaltNearlyEmpty" and r.get("to") is None
+    ], "no phantom transition to null may be written"
+
+
+def test_every_consumable_the_report_names_is_carried_across_a_poll():
+    """The two lists must not drift apart; a missed one clears itself."""
+    assert set(report.CONSUMABLE_KEYS) <= set(store.EVENT_ONLY_KEYS)
+
+
+# --- One concept, one name -------------------------------------------------
+
+def test_apply_event_folds_the_stream_programme_key_onto_the_polled_one(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    state = {"dishwasher": {}}
+
+    daemon.apply_event(
+        state, "dishwasher",
+        [("BSH.Common.Root.ActiveProgram", "Dishcare.Dishwasher.Program.Eco50")],
+        events_path, now=lambda: "T1",
+    )
+
+    assert state["dishwasher"] == {"Programme": "Eco50"}
+    assert "ActiveProgram" not in state["dishwasher"]
+
+
+def test_a_cycle_whose_programme_arrived_on_the_stream_is_named(tmp_path):
+    """`report.cycles` matches "Programme"; the stream says "ActiveProgram"."""
+    events_path = tmp_path / "events.jsonl"
+    state = {"dishwasher": {"OperationState": "Ready"}}
+
+    daemon.apply_event(
+        state, "dishwasher",
+        [
+            ("BSH.Common.Root.ActiveProgram", "Dishcare.Dishwasher.Program.Eco50"),
+            ("BSH.Common.Status.OperationState",
+             "BSH.Common.EnumType.OperationState.Run"),
+        ],
+        events_path, now=lambda: "2026-08-26T19:00:00Z",
+    )
+
+    records, _ = store.read_records(events_path)
+    cycle = report.cycles(records)[0]
+    assert cycle.programme == "Eco50", "a live-observed cycle must not be unknown"
+
+
+def test_a_selected_programme_is_carried_across_a_poll_too():
+    """`/programs/selected` is never polled, so the stream is its only source."""
+    client = _dishwasher_client()
+    previous = {"dishwasher": {"SelectedProgramme": "Eco50"}}
+
+    observed = daemon.observe(client, previous=previous)
+
+    assert observed["dishwasher"]["SelectedProgramme"] == "Eco50"
+
+
+# --- Restarts, and gaps measured on a clock that survives sleep ------------
+
+def test_run_marks_a_gap_when_it_restarts_over_existing_state(tmp_path):
+    """The commonest interruption is a restart, not a crash."""
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    store.save_state({"dishwasher": {"OperationState": "Ready"}}, state_path)
+    an_hour_ago = time.time() - 3600
+    os.utime(state_path, (an_hour_ago, an_hour_ago))
+
+    daemon.run(
+        build_client=_dishwasher_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        iterations=1,
+    )
+
+    records, _ = store.read_records(events_path)
+    markers = [r for r in records if r.get("event") == "coverage_gap"]
+    assert [m["reason"] for m in markers] == ["restart"]
+    assert markers[0]["from"] is not None, "the gap must say when watching stopped"
+
+
+def test_run_does_not_mark_a_restart_that_lost_no_time(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    store.save_state({"dishwasher": {"OperationState": "Ready"}}, state_path)
+
+    daemon.run(
+        build_client=_dishwasher_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        iterations=1,
+    )
+
+    records, _ = store.read_records(events_path)
+    assert [r for r in records if r.get("event") == "coverage_gap"] == []
+
+
+def test_run_records_a_gap_the_monotonic_clock_slept_through(tmp_path, monkeypatch):
+    """macOS's monotonic clock does not advance while the machine sleeps.
+
+    An eight-hour sleep is the exact interruption this deployment exists to
+    notice, and `CLOCK_UPTIME_RAW` measures it as very nearly nothing. The
+    span must therefore come off the wall clock.
+    """
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: "stream_ended")
+
+    daemon.run(
+        build_client=_dishwasher_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=3600),
+        clock=lambda: 0.0,  # a clock frozen by sleep, as macOS's would be
+        iterations=2,
+    )
+
+    records, _ = store.read_records(events_path)
+    reasons = [r["reason"] for r in records if r.get("event") == "coverage_gap"]
+    assert "stream_lost" in reasons
+
+
+def test_run_writes_the_diagnosed_reason_into_the_marker(tmp_path, monkeypatch):
+    """The reason is the only diagnostic a later reader has."""
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    endings = iter(["stream_ended", "reconcile"])
+    monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: next(endings))
+
+    daemon.run(
+        build_client=_dishwasher_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=100),
+        iterations=2,
+    )
+
+    records, _ = store.read_records(events_path)
+    reasons = [r["reason"] for r in records if r.get("event") == "coverage_gap"]
+    assert reasons == ["startup", "stream_lost"], "not the undiagnostic 'recovered'"
+
+
+def test_run_marks_a_network_failure_as_such(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    attempts = iter([requests.ConnectionError("down"), None])
+
+    def build_client():
+        problem = next(attempts)
+        if problem is not None:
+            raise problem
+        return _dishwasher_client()
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=200),
+        iterations=2,
+    )
+
+    records, _ = store.read_records(events_path)
+    reasons = [r["reason"] for r in records if r.get("event") == "coverage_gap"]
+    assert "network_error" in reasons
+
+
+# --- Failures that must not kill a process meant to run for weeks ----------
+
+def test_run_treats_a_locked_keychain_as_an_authentication_failure(
+    tmp_path, capsys
+):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    def build_client():
+        raise auth.KeyringError("the Keychain is locked")
+
+    with pytest.raises(daemon.AuthenticationExhausted):
+        daemon.run(
+            build_client=build_client,
+            session_factory=lambda: None,
+            events_path=events_path,
+            state_path=state_path,
+            sleep=lambda _: None,
+            delays=iter([0.0] * 10),
+            iterations=5,
+        )
+
+    assert "Keychain" in capsys.readouterr().err
+
+
+def test_run_backs_off_far_harder_when_the_quota_is_exhausted(tmp_path):
+    """Re-asking an exhausted daily quota every five minutes keeps it that way."""
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    slept: list[float] = []
+
+    def build_client():
+        raise QuotaExceeded("SDK.Error.RequestQuotaExceeded")
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=slept.append,
+        delays=iter([0.5] * 10),
+        iterations=2,
+    )
+
+    assert slept == [daemon.QUOTA_BACKOFF_SECONDS]
+    assert daemon.QUOTA_BACKOFF_SECONDS > 300, "harder than the backoff ceiling"
+
+
+def test_stream_once_closes_a_rejected_response(tmp_path):
+    """A rejected stream is still an open connection."""
+    response = FakeStreamResponse([], status_code=401)
+
+    class FakeSession:
+        def get(self, url, headers=None, stream=None, timeout=None):
+            return response
+
+    reason = daemon.stream_once(
+        FakeSession(), "https://example.invalid/events", "tok", {}, {},
+        tmp_path / "events.jsonl", now=lambda: "T1",
+        state_path=tmp_path / "state.json",
+    )
+
+    assert reason == "http_401"
+    assert response.closed, "one leaked connection per failing cycle otherwise"

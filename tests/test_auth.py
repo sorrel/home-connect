@@ -279,3 +279,63 @@ def test_redeem_device_code_expired_token_is_fatal_not_pending():
         )
 
     assert not isinstance(caught.value, auth.AuthorisationPending)
+
+
+# --- The refresh-token race ------------------------------------------------
+
+def test_access_token_retries_once_with_a_freshly_stored_token():
+    """The CLI and the recorder share one entry, and rotation invalidates.
+
+    Whichever loses the race presents a token the other has just replaced.
+    That is a lost race, not a lost credential, so it must not cost a browser
+    re-consent.
+    """
+    keyring = FakeKeyring({(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME): "stale"})
+
+    class RacingSession(FakeSession):
+        def post(self, url, data=None, timeout=None):
+            # The other process rotates the stored token between the two
+            # attempts, exactly as it would in the real race.
+            keyring.store[(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME)] = "fresh"
+            return super().post(url, data, timeout)
+
+    session = RacingSession([
+        FakeResponse(400, {"error": "invalid_grant"}),
+        FakeResponse(200, {"access_token": "at-2", "refresh_token": "rotated"}),
+    ])
+
+    token = auth.access_token(CREDENTIALS, session=session, keyring_module=keyring)
+
+    assert token == "at-2"
+    assert session.calls[1][1]["refresh_token"] == "fresh"
+    assert keyring.store[(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME)] == "rotated"
+
+
+def test_access_token_does_not_retry_the_very_same_token():
+    """Nothing rotated it, so a second attempt would only waste a request."""
+    keyring = FakeKeyring({(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME): "stale"})
+    session = FakeSession([FakeResponse(400, {"error": "invalid_grant"})])
+
+    with pytest.raises(auth.NotAuthenticated):
+        auth.access_token(CREDENTIALS, session=session, keyring_module=keyring)
+
+    assert len(session.calls) == 1
+
+
+def test_rejection_message_suggests_retrying_before_re_consent():
+    keyring = FakeKeyring({(auth.KEYRING_SERVICE, auth.KEYRING_USERNAME): "stale"})
+    session = FakeSession([FakeResponse(400, {"error": "invalid_grant"})])
+
+    with pytest.raises(auth.NotAuthenticated) as raised:
+        auth.access_token(CREDENTIALS, session=session, keyring_module=keyring)
+
+    message = str(raised.value)
+    assert "try again" in message.lower()
+    assert "rotated" in message.lower()
+
+
+def test_keyring_error_is_exposed_for_callers_to_catch():
+    """Both the CLI and the recorder catch it by this name."""
+    import keyring.errors
+
+    assert auth.KeyringError is keyring.errors.KeyringError

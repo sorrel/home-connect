@@ -46,6 +46,16 @@ def _run(action):
         raise click.ClickException(
             f"{exc}\nRun `homeconnect auth` to authorise this machine."
         ) from exc
+    except auth.KeyringError as exc:
+        # A locked Keychain, a denied prompt, or one that keeps reprompting.
+        # A specific, known, external type — not a bare `Exception` — and
+        # without it this reaches the terminal as a traceback.
+        raise click.ClickException(
+            "The macOS Keychain holding the stored credential could not be "
+            f"read ({type(exc).__name__}). Unlock your Keychain and allow "
+            "access when prompted, then try again. If it persists, run "
+            "`homeconnect auth` to store a fresh credential."
+        ) from exc
     except requests.RequestException as exc:
         # Wifi off, DNS down, connection reset, timeout: by some distance the
         # likeliest real failure, and the one that used to print a traceback.

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Iterator
 
 import requests
@@ -23,7 +24,7 @@ from . import appliances as appliances_module
 from . import auth
 from . import store
 from . import stream
-from .api import BASE_URL, Client, HomeConnectError, NotAuthorised
+from .api import BASE_URL, Client, HomeConnectError, NotAuthorised, QuotaExceeded
 
 #: Poll again this often even while the stream looks healthy.
 RECONCILE_SECONDS = 3600
@@ -34,6 +35,22 @@ RECONCILE_SECONDS = 3600
 #: transition — recording it anyway would flood the log with reconnects that
 #: nobody needs to read.
 GAP_THRESHOLD_SECONDS = 120
+
+#: How long to wait after a 429 before touching the API again. The quota is a
+#: daily one, so the ordinary backoff — which tops out at five minutes — would
+#: spend the rest of the day re-asking an exhausted quota for permission, which
+#: is how a quota stays exhausted. Half an hour, and the stream is unaffected.
+QUOTA_BACKOFF_SECONDS = 1800
+
+#: Stream keys that name a concept the poll already has a name for. Folded at
+#: the point events are applied, so one concept has exactly one name in the
+#: log. Without this the poll writes `Programme` and the stream writes
+#: `ActiveProgram`, and `report.cycles` — which matches `Programme` — renders
+#: every live-observed cycle as "unknown programme".
+_STREAM_KEY_ALIASES = {
+    "ActiveProgram": "Programme",
+    "SelectedProgram": "SelectedProgramme",
+}
 
 #: Vendor namespaces whose enum values are reduced to their final segment.
 #: Deliberately a fixed list, not "any dotted string" — a value like "1.5"
@@ -70,13 +87,20 @@ def observe(
     disconnected appliance carries its previous entry forward unchanged and
     gets a single `Connected: False` marker; a connected one gets
     `Connected: True` alongside its real readings.
+
+    A *connected* appliance needs a narrower version of the same care. A poll
+    can only report what the API will answer, and `store.EVENT_ONLY_KEYS` are
+    keys it never will — they exist solely as stream events. Rebuilt purely
+    from the poll, a salt warning learnt an hour ago would be logged as
+    `SaltNearlyEmpty: "Present" -> null`, which the report reads as `ok`. So
+    those keys, and only those, are carried forward from `previous` too.
     """
     observed: dict[str, dict] = {}
     for appliance in (found if found is not None else
                       appliances_module.list_appliances(client)):
         label = label_for(appliance)
+        prior = (previous or {}).get(label, {}) or {}
         if not appliance.connected:
-            prior = (previous or {}).get(label, {})
             flat = dict(prior)
             flat["Connected"] = False
             observed[label] = flat
@@ -98,6 +122,9 @@ def observe(
                 if short in flat:
                     short = f"Option{short}"
                 flat[short] = _tail(value)
+        for key in store.EVENT_ONLY_KEYS:
+            if key not in flat and key in prior:
+                flat[key] = prior[key]
         flat["Connected"] = True
         observed[label] = flat
     return observed
@@ -138,11 +165,16 @@ def apply_event(
 
     The vendor repeats values freely — a repeated value is not a change, and
     logging it would inflate every cycle count drawn from this file.
+
+    Stream key names are folded onto the poll's namespace here, via
+    `_STREAM_KEY_ALIASES`, so that one concept has one name in the log
+    regardless of which of the two sources happened to observe it.
     """
     stamp = now()
     current = state.setdefault(label, {})
     for raw_key, raw_value in changes:
         key = store.short_key(raw_key)
+        key = _STREAM_KEY_ALIASES.get(key, key)
         value = _tail(raw_value)
         if current.get(key) != value:
             store.append_record(
@@ -160,6 +192,36 @@ def record_gap(
 ) -> None:
     """Mark a period during which nothing was watching."""
     store.append_record(store.gap_record(now(), since, reason), events_path)
+
+
+def _last_watched_at(state_path) -> str | None:
+    """When the recorder last wrote state, as a `utc_now`-shaped stamp.
+
+    The state file is rewritten after every event and every poll, so its
+    modification time is the last instant anything was known to be watching —
+    which is exactly the `from` a restart's coverage marker needs.
+    """
+    try:
+        modified = state_path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(modified, timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _gap_worth_recording(since: str | None, until: str) -> bool:
+    """Whether an interruption from `since` to `until` deserves a marker.
+
+    An unreadable pair of stamps is recorded rather than dismissed: this log
+    exists to distinguish an uneventful hour from an unwatched one, so where
+    the length cannot be established, "unknown" must not silently become
+    "too short to matter".
+    """
+    if since is None:
+        return False
+    span = store.elapsed_seconds(since, until)
+    return span is None or span >= GAP_THRESHOLD_SECONDS
 
 
 class AuthenticationExhausted(Exception):
@@ -241,6 +303,9 @@ def stream_once(
         timeout=(10, 90),
     )
     if getattr(response, "status_code", 200) != 200:
+        # Closed explicitly: a rejected stream is still an open connection, and
+        # a 401 every cycle for a fortnight would otherwise leak one apiece.
+        response.close()
         return f"http_{response.status_code}"
 
     deadline = clock() + RECONCILE_SECONDS
@@ -299,10 +364,21 @@ def run(
     watching stops (`coverage_lost_at`, stamped when `stream_once` returns
     anything but `"reconcile"`, or when an exception is caught) to the moment
     it resumes (the next successful poll). It is written only if that span
-    exceeded `GAP_THRESHOLD_SECONDS` — `clock()` (monotonic, independent of
-    `now()`'s wall-clock stamps) measures the span so a fake `now()` in tests
-    cannot distort it. A `"reconcile"` ending is a deliberate, healthy
-    reconnection and never starts a gap.
+    exceeded `GAP_THRESHOLD_SECONDS`, measured on the **wall clock** from the
+    `now()` stamps themselves — see `store.elapsed_seconds` for why monotonic
+    time is the wrong instrument on a laptop that sleeps. The marker carries
+    the diagnosed reason (`stream_lost`, `network_error`, `quota_exceeded`,
+    an `api_error:…`), because it is the only diagnostic a later reader has.
+    A `"reconcile"` ending is a deliberate, healthy reconnection and never
+    starts a gap.
+
+    Every start where prior state exists and time has passed since it was
+    written also gets a marker. The commonest interruption by far is not a
+    crash but a restart — a sleeping laptop, a logout, `launchctl unload` —
+    and after the first run `state.json` always exists, so a `startup` marker
+    written only when state is absent would never be written again. The
+    state file's modification time is the last instant the recorder is known
+    to have been watching.
 
     Raises `AuthenticationExhausted` after two consecutive authentication
     failures, so `main()` can exit non-zero and let launchd restart the
@@ -315,14 +391,22 @@ def run(
     state = store.load_state(state_path)
     if not state:
         record_gap(None, "startup", events_path, now)
+    else:
+        last_known_good = _last_watched_at(state_path)
+        resumed_at = now()
+        if _gap_worth_recording(last_known_good, resumed_at):
+            store.append_record(
+                store.gap_record(resumed_at, last_known_good, "restart"), events_path
+            )
 
     coverage_lost_at: str | None = None
-    coverage_lost_since: float | None = None
+    coverage_lost_reason: str | None = None
     consecutive_auth_failures = 0
 
     completed = 0
     while iterations is None or completed < iterations:
         healthy_stream = False
+        hit_quota = False
         try:
             client = build_client()
             found = appliances_module.list_appliances(client)
@@ -336,13 +420,17 @@ def run(
 
             # This poll succeeded, so any tracked interruption ends here.
             if coverage_lost_at is not None:
-                if (clock() - coverage_lost_since) >= GAP_THRESHOLD_SECONDS:
+                resumed_at = now()
+                if _gap_worth_recording(coverage_lost_at, resumed_at):
                     store.append_record(
-                        store.gap_record(now(), coverage_lost_at, "recovered"),
+                        store.gap_record(
+                            resumed_at, coverage_lost_at,
+                            coverage_lost_reason or "recovered",
+                        ),
                         events_path,
                     )
                 coverage_lost_at = None
-                coverage_lost_since = None
+                coverage_lost_reason = None
 
             unknown_haid_events: list[None] = []
             token = token_holder.get() if token_holder else ""
@@ -374,7 +462,11 @@ def run(
             healthy_stream = reason == "reconcile"
             if not healthy_stream and coverage_lost_at is None:
                 coverage_lost_at = now()
-                coverage_lost_since = clock()
+                # "stream_ended" is the loop's internal word for it; the log's
+                # word, and the spec's, is "stream_lost".
+                coverage_lost_reason = (
+                    "stream_lost" if reason == "stream_ended" else reason
+                )
         except NotAuthorised:
             consecutive_auth_failures += 1
             if token_holder:
@@ -382,7 +474,7 @@ def run(
             reason = "api_error:NotAuthorised"
             if coverage_lost_at is None:
                 coverage_lost_at = now()
-                coverage_lost_since = clock()
+                coverage_lost_reason = reason
         except auth.NotAuthenticated as exc:
             # Not a HomeConnectError — raised by auth.access_token() when the
             # stored refresh token itself is no good, which is exactly the
@@ -393,19 +485,48 @@ def run(
             reason = f"api_error:{type(exc).__name__}"
             if coverage_lost_at is None:
                 coverage_lost_at = now()
-                coverage_lost_since = clock()
+                coverage_lost_reason = reason
+        except auth.KeyringError as exc:
+            # A locked, denied or reprompting Keychain. Left uncaught this
+            # escapes main() as a traceback and kills a process that was meant
+            # to run for weeks, so it is treated as what it is: a failure to
+            # authenticate. Two in a row still exit non-zero, which lets
+            # launchd retry later rather than spin against a locked Keychain.
+            consecutive_auth_failures += 1
+            if token_holder:
+                token_holder.invalidate()
+            reason = f"keychain_error:{type(exc).__name__}"
+            print(
+                "recorder: the macOS Keychain could not be read "
+                f"({type(exc).__name__}). Unlock it and allow access, or run "
+                "`homeconnect auth` again.",
+                file=sys.stderr,
+            )
+            if coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_reason = reason
+        except QuotaExceeded:
+            # The daily quota is spent. Backing off by the ordinary sequence
+            # would re-ask an exhausted quota every five minutes for the rest
+            # of the day; the stream needs no quota and keeps running.
+            consecutive_auth_failures = 0
+            hit_quota = True
+            reason = "quota_exceeded"
+            if coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_reason = reason
         except HomeConnectError as exc:
             consecutive_auth_failures = 0
             reason = f"api_error:{type(exc).__name__}"
             if coverage_lost_at is None:
                 coverage_lost_at = now()
-                coverage_lost_since = clock()
+                coverage_lost_reason = reason
         except requests.RequestException:
             consecutive_auth_failures = 0
             reason = "network_error"
             if coverage_lost_at is None:
                 coverage_lost_at = now()
-                coverage_lost_since = clock()
+                coverage_lost_reason = reason
 
         if consecutive_auth_failures >= 2:
             raise AuthenticationExhausted(
@@ -421,7 +542,7 @@ def run(
                 # already-advanced backoff must not punish a recorder that
                 # just proved the connection is fine.
                 delays = delays_factory()
-            sleep(next(delays))
+            sleep(QUOTA_BACKOFF_SECONDS if hit_quota else next(delays))
 
 
 def main() -> int:

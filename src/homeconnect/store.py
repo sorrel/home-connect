@@ -10,12 +10,49 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-DATA_DIR = Path("data")
+#: Keys that only ever arrive on the event stream — a poll can never return
+#: them, because the API answers `SDK.Error.UnsupportedStatus` for each. They
+#: matter here because a reconciliation poll rebuilds state from what it can
+#: read, and anything in this set would otherwise appear to have vanished:
+#: `SaltNearlyEmpty: "Present" -> null`, which a report reads as "ok". The
+#: recorder therefore carries these forward across a poll instead.
+#:
+#: `SelectedProgramme` is here for the same reason: the recorder polls
+#: `/programs/active`, never `/programs/selected`, so a selected programme
+#: learnt from the stream is unpollable too.
+EVENT_ONLY_KEYS = (
+    "SaltNearlyEmpty",
+    "RinseAidNearlyEmpty",
+    "MachineCareReminder",
+    "SelectedProgramme",
+)
+
+
+def default_data_dir() -> Path:
+    """Where the log and state live, independent of the current directory.
+
+    Anchored to the repository root derived from this module's own location,
+    not to `Path("data")`: `homeconnect history` run from anywhere but the
+    repository would otherwise find an empty directory and report "No events
+    recorded yet", which is indistinguishable from a dead recorder.
+
+    `HOMECONNECT_DATA_DIR` overrides it, which also covers the case of the
+    package being installed somewhere other than a checkout.
+    """
+    override = os.environ.get("HOMECONNECT_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    # …/<repository>/src/homeconnect/store.py -> …/<repository>
+    return Path(__file__).resolve().parents[2] / "data"
+
+
+DATA_DIR = default_data_dir()
 EVENTS_PATH = DATA_DIR / "events.jsonl"
 STATE_PATH = DATA_DIR / "state.json"
 LOCK_PATH = DATA_DIR / "recorder.lock"
@@ -41,6 +78,38 @@ def utc_now() -> str:
     back, and this file is append-only, so that damage would be permanent.
     """
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def parse_stamp(stamp: Any) -> datetime | None:
+    """Turn a stamp written by `utc_now` back into a datetime, or `None`.
+
+    `None` for anything that will not parse, so a caller decides what an
+    unreadable stamp means rather than having a `ValueError` decide for it.
+    """
+    if not isinstance(stamp, str):
+        return None
+    try:
+        return datetime.strptime(stamp, _STAMP_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def elapsed_seconds(since: Any, until: Any) -> float | None:
+    """Wall-clock seconds between two stamps, or `None` if either is unreadable.
+
+    Deliberately the wall clock and not `time.monotonic()`. On macOS the
+    monotonic clock is `CLOCK_UPTIME_RAW`, which does not advance while the
+    machine sleeps — so an overnight sleep, the exact interruption this
+    recorder exists to notice, can measure as a couple of seconds and be
+    dismissed as too short to record.
+    """
+    start, end = parse_stamp(since), parse_stamp(until)
+    if start is None or end is None:
+        return None
+    return (end - start).total_seconds()
 
 
 def transition_record(ts: str, label: str, key: str, before: Any, after: Any) -> dict:

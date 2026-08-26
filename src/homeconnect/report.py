@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+#: The consumables this report answers for, in the order it lists them. Every
+#: one is a `store.EVENT_ONLY_KEYS` member — it has to be, since none can be
+#: polled — and `tests/test_report.py` holds that relationship in place.
 CONSUMABLE_KEYS = ("SaltNearlyEmpty", "RinseAidNearlyEmpty", "MachineCareReminder")
 
 RUNNING = "Run"
@@ -48,11 +51,21 @@ def cycles(records: list[dict]) -> list[Cycle]:
     """Pair each transition into `Run` with the next one out of it."""
     found: list[Cycle] = []
     open_cycles: dict[str, dict] = {}
+    # A programme named before its run was seen to start, held only for the
+    # instant it was named. A poll always writes OperationState before
+    # Programme, but the stream sends whatever order the vendor chose, and the
+    # pair then share a timestamp. Held no longer than that: attributing an
+    # older programme to a later run would be a guess dressed as an
+    # observation, and this report does not guess.
+    pending: dict[str, tuple[str, str | None]] = {}
 
     for record in sorted(_transitions(records), key=lambda r: r["ts"]):
         label = record.get("ha", "appliance")
-        if record["key"] == "Programme" and label in open_cycles:
-            open_cycles[label]["programme"] = record.get("to")
+        if record["key"] == "Programme":
+            if label in open_cycles:
+                open_cycles[label]["programme"] = record.get("to")
+            else:
+                pending[label] = (record["ts"], record.get("to"))
             continue
         if record["key"] != "OperationState":
             continue
@@ -64,7 +77,11 @@ def cycles(records: list[dict]) -> list[Cycle]:
                 # stale one as unfinished rather than silently dropping it.
                 stale = open_cycles.pop(label)
                 found.append(Cycle(label, stale["started"], None, stale["programme"]))
-            open_cycles[label] = {"started": record["ts"], "programme": None}
+            named_at, named = pending.pop(label, (None, None))
+            open_cycles[label] = {
+                "started": record["ts"],
+                "programme": named if named_at == record["ts"] else None,
+            }
         elif label in open_cycles and record.get("to") in FINISHED_STATES:
             started = open_cycles.pop(label)
             found.append(Cycle(label, started["started"], record["ts"],
@@ -115,7 +132,12 @@ def render(records: list[dict], skipped: int = 0) -> str:
 
     found = cycles(records)
     lines.append(f"Cycles: {len(found)}")
-    for cycle in found[-10:]:
+    shown = found[-10:]
+    if len(shown) < len(found):
+        # Said out loud rather than truncated in silence: a reader comparing
+        # the count above with the lines below must not be left to guess.
+        lines.append(f"  (showing the {len(shown)} most recent)")
+    for cycle in shown:
         ended = cycle.ended or "still running"
         programme = cycle.programme or "unknown programme"
         lines.append(f"  {cycle.started}  {programme}  -> {ended}")
