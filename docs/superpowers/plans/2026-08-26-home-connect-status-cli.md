@@ -1048,6 +1048,38 @@ def test_fetch_state_treats_idle_409_as_no_programme():
     assert state.programme is None
 
 
+def test_parses_the_recorded_live_payloads():
+    """Guards the hand-written dicts above against drifting from reality.
+
+    These fixtures are the exact responses the real appliance returned on
+    26 August 2026 (haId anonymised). If our parsing assumptions are wrong,
+    this fails even when every hand-written fixture above still passes.
+    """
+    import json
+    from pathlib import Path
+
+    fixtures = Path(__file__).parent / "fixtures"
+    raw_appliances = json.loads((fixtures / "appliances.json").read_text())
+    raw_status = json.loads((fixtures / "status_idle.json").read_text())
+    ha_id = raw_appliances["data"]["homeappliances"][0]["haId"]
+
+    client = FakeClient({
+        "/homeappliances": raw_appliances["data"],
+        f"/homeappliances/{ha_id}/status": raw_status["data"],
+        f"/homeappliances/{ha_id}/programs/active": NoProgrammeActive(
+            "SDK.Error.NoProgramActive"
+        ),
+    })
+
+    appliance = appliances.list_appliances(client)[0]
+    state = appliances.fetch_state(client, appliance)
+
+    assert appliance.type == "Dishwasher"
+    assert appliance.connected is True
+    assert state.status["BSH.Common.Status.DoorState"].endswith("Open")
+    assert state.programme is None
+
+
 def test_fetch_state_skips_calls_for_offline_appliance():
     offline = appliances.Appliance(
         ha_id="BOSCH-TEST-0002", name="Oven", type="Oven", brand="Bosch",
@@ -1164,7 +1196,7 @@ def fetch_state(client: Any, appliance: Appliance) -> ApplianceState:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_appliances.py -v`
-Expected: 4 passed
+Expected: 5 passed
 
 - [ ] **Step 5: Commit**
 
@@ -1619,7 +1651,6 @@ A bare `homeconnect` prints the one-line verdict for every appliance. The
 from __future__ import annotations
 
 import json
-import sys
 import time
 
 import click
@@ -1702,8 +1733,10 @@ def cli(ctx, verbose: bool, as_json: bool, appliance: str | None) -> None:
         click.echo(present.render(state, verbose=verbose))
 
 
-@cli.command()
+@cli.command(name="auth")
 def auth_command() -> None:
+    # Named "auth" for the user; the Python identifier differs so it does not
+    # shadow the imported `auth` module inside this file.
     """Authorise this machine (one-off)."""
     credentials = auth.load_credentials()
     code = auth.begin_device_authorisation(credentials)
@@ -1723,10 +1756,6 @@ def auth_command() -> None:
         return
 
     raise click.ClickException("Timed out waiting for approval.")
-
-
-# Registered under the name the user types, not the Python identifier.
-cli.add_command(auth_command, name="auth")
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -1737,7 +1766,7 @@ Expected: 5 passed
 - [ ] **Step 5: Run the whole suite**
 
 Run: `uv run pytest -q`
-Expected: all tests pass (approximately 34)
+Expected: all tests pass (approximately 35)
 
 - [ ] **Step 6: Commit**
 
