@@ -98,13 +98,20 @@ def test_parses_the_recorded_live_payloads():
     fixtures = Path(__file__).parent / "fixtures"
     raw_appliances = json.loads((fixtures / "appliances.json").read_text())
     raw_status = json.loads((fixtures / "status_idle.json").read_text())
+    # The recorded 404 body from an idle machine. Its error key is what api.py
+    # matches on to raise NoProgrammeActive, so drive the idle path with the
+    # real key rather than a hand-typed one.
+    raw_idle_active = json.loads(
+        (fixtures / "programs_active_idle.json").read_text()
+    )
+    assert raw_idle_active["error"]["key"] == "SDK.Error.NoProgramActive"
     ha_id = raw_appliances["data"]["homeappliances"][0]["haId"]
 
     client = FakeClient({
         "/homeappliances": raw_appliances["data"],
         f"/homeappliances/{ha_id}/status": raw_status["data"],
         f"/homeappliances/{ha_id}/programs/active": NoProgrammeActive(
-            "SDK.Error.NoProgramActive"
+            raw_idle_active["error"]["key"]
         ),
     })
 
