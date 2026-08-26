@@ -61,6 +61,18 @@ _VENDOR_PREFIXES = (
 )
 
 
+def log(message: str, *, error: bool = False) -> None:
+    """Write one timestamped line to the recorder's log.
+
+    Every line carries a UTC instant. launchd appends to these files and never
+    truncates them, so without a timestamp there is no way to tell a line
+    written moments ago from one left over by a previous run — which is exactly
+    the confusion an error log exists to prevent. UTC for the same reason the
+    event log uses it: the files outlive a clock change.
+    """
+    print(f"{store.utc_now()} {message}", file=sys.stderr if error else sys.stdout, flush=True)
+
+
 def label_for(appliance: Any) -> str:
     """A stable, human label for an appliance.
 
@@ -440,10 +452,10 @@ def run(
                 clock=clock, on_unknown_haid=lambda: unknown_haid_events.append(None),
             )
             if unknown_haid_events:
-                print(
-                    f"recorder: skipped {len(unknown_haid_events)} event(s) this "
-                    "cycle for an haId not in the current appliance list",
-                    file=sys.stderr,
+                log(
+                    f"skipped {len(unknown_haid_events)} event(s) this cycle "
+                    "for an haId not in the current appliance list",
+                    error=True,
                 )
 
             if reason == "http_401":
@@ -496,11 +508,11 @@ def run(
             if token_holder:
                 token_holder.invalidate()
             reason = f"keychain_error:{type(exc).__name__}"
-            print(
-                "recorder: the macOS Keychain could not be read "
+            log(
+                "the macOS Keychain could not be read "
                 f"({type(exc).__name__}). Unlock it and allow access, or run "
                 "`homeconnect auth` again.",
-                file=sys.stderr,
+                error=True,
             )
             if coverage_lost_at is None:
                 coverage_lost_at = now()
@@ -550,10 +562,11 @@ def main() -> int:
     try:
         credentials = auth.load_credentials()
     except auth.MissingCredentials as exc:
-        print(f"{exc}", file=sys.stderr)
+        log(f"{exc}", error=True)
         return 2
 
     token_holder = TokenHolder(lambda: auth.access_token(credentials))
+    log("recorder starting")
 
     try:
         with store.single_instance_lock():
@@ -563,11 +576,13 @@ def main() -> int:
                 token_holder=token_holder,
             )
     except store.AlreadyRunning as exc:
-        print(f"{exc}", file=sys.stderr)
+        log(f"{exc}", error=True)
         return 3
     except AuthenticationExhausted as exc:
-        print(f"{exc}", file=sys.stderr)
+        log(f"{exc}", error=True)
         return 4
     except KeyboardInterrupt:
+        log("recorder stopped by interrupt")
         return 0
+    log("recorder stopped")
     return 0

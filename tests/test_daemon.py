@@ -1,7 +1,7 @@
 import contextlib
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -1109,3 +1109,25 @@ def test_stream_once_closes_a_rejected_response(tmp_path):
 
     assert reason == "http_401"
     assert response.closed, "one leaked connection per failing cycle otherwise"
+
+
+def test_log_prefixes_a_utc_instant(capsys):
+    """launchd appends and never truncates, so an unstamped line is unreadable."""
+    daemon.log("hello")
+    out = capsys.readouterr().out.strip()
+    stamp, _, message = out.partition(" ")
+    assert message == "hello"
+    assert stamp.endswith("Z")
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    assert parsed.utcoffset() == timedelta(0)
+    assert abs(parsed - datetime.now(timezone.utc)) < timedelta(seconds=5)
+
+
+def test_log_sends_errors_to_stderr_and_notices_to_stdout(capsys):
+    daemon.log("a notice")
+    daemon.log("a problem", error=True)
+    captured = capsys.readouterr()
+    assert "a notice" in captured.out
+    assert "a notice" not in captured.err
+    assert "a problem" in captured.err
+    assert "a problem" not in captured.out
