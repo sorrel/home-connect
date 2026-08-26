@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -12,10 +13,17 @@ def test_short_key_strips_the_vendor_path():
 
 
 def test_utc_now_is_iso_utc_with_a_trailing_z():
+    before = datetime.now(timezone.utc)
     stamp = store.utc_now()
+
     assert stamp.endswith("Z")
     assert "T" in stamp
     assert "+" not in stamp
+
+    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    assert abs(parsed - before) < timedelta(seconds=5)
 
 
 def test_transition_record_shape():
@@ -33,12 +41,23 @@ def test_transition_record_shape():
 
 
 def test_records_never_contain_a_device_identifier():
-    """haId is a device serial and must not reach the log."""
-    record = store.transition_record(
+    """haId is a device serial and must not reach the log.
+
+    The protection is structural: neither record type has a field for it, so
+    assert the field sets exactly, not just the absence of a substring — that
+    genuinely fails if anyone later widens a record with an extra field, which
+    is how a serial would actually get in.
+    """
+    transition = store.transition_record(
         "2026-08-26T19:04:11Z", "dishwasher",
         "BSH.Common.Status.DoorState", None, "Open",
     )
-    assert "haId" not in json.dumps(record)
+    assert set(transition) == {"ts", "ha", "key", "from", "to"}
+    assert "haId" not in json.dumps(transition)
+
+    gap = store.gap_record("2026-08-26T19:04:11Z", "2026-08-26T18:00:00Z", "sleep")
+    assert set(gap) == {"ts", "event", "from", "reason"}
+    assert "haId" not in json.dumps(gap)
 
 
 def test_append_and_read_round_trip(tmp_path):

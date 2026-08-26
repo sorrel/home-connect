@@ -150,6 +150,10 @@ def single_instance_lock(path: Path = LOCK_PATH) -> Iterator[None]:
     handle = path.open("w")
     try:
         try:
+            # flock, not lockf/POSIX record locks: flock locks are per-open-file-
+            # description, so two acquisitions within one process genuinely
+            # conflict; POSIX record locks would silently succeed here and let
+            # two recorders interleave writes.
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
             raise AlreadyRunning(f"another recorder holds {path}") from exc
