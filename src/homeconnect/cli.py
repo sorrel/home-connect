@@ -158,3 +158,23 @@ def auth_command() -> None:
         return
 
     raise click.ClickException("Timed out waiting for approval.")
+
+
+@cli.command(name="history")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
+def history_command(as_json: bool) -> None:
+    """Report on what the recorder has observed."""
+    from . import report, store
+
+    records, skipped = store.read_records(store.EVENTS_PATH)
+
+    if as_json:
+        click.echo(json.dumps({
+            "cycles": [vars(c) for c in report.cycles(records)],
+            "consumables": [vars(c) for c in report.consumables(records)],
+            "gaps": report.coverage(records)[0],
+            "skipped": skipped,
+        }, indent=2))
+        return
+
+    click.echo(report.render(records, skipped))

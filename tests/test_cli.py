@@ -333,3 +333,30 @@ def test_auth_loop_backs_off_when_told_to_slow_down(monkeypatch):
 
     assert result.exit_code == 0
     assert slept == [0, 5]
+
+
+def test_history_reports_an_empty_log(monkeypatch, tmp_path):
+    from homeconnect import store
+
+    monkeypatch.setattr(store, "EVENTS_PATH", tmp_path / "absent.jsonl")
+
+    result = CliRunner().invoke(cli_module.cli, ["history"])
+
+    assert result.exit_code == 0
+    assert "no events" in result.output.lower()
+
+
+def test_history_json_is_parseable(monkeypatch, tmp_path):
+    from homeconnect import store
+
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        '{"ts":"2026-08-26T19:00:00Z","ha":"dishwasher",'
+        '"key":"OperationState","from":"Ready","to":"Run"}\n'
+    )
+    monkeypatch.setattr(store, "EVENTS_PATH", path)
+
+    result = CliRunner().invoke(cli_module.cli, ["history", "--json"])
+
+    payload = json.loads(result.output)
+    assert payload["cycles"][0]["started"] == "2026-08-26T19:00:00Z"
