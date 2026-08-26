@@ -360,3 +360,15 @@ def test_history_json_is_parseable(monkeypatch, tmp_path):
 
     payload = json.loads(result.output)
     assert payload["cycles"][0]["started"] == "2026-08-26T19:00:00Z"
+
+
+def test_help_command_runs():
+    result = CliRunner().invoke(cli_module.cli, ["help"])
+    assert result.exit_code == 0
+    assert "Quick Reference" in result.output
+
+
+def test_unknown_command_suggests_a_similar_one():
+    result = CliRunner().invoke(cli_module.cli, ["histry"])
+    assert result.exit_code != 0
+    assert "history" in result.output

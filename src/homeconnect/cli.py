@@ -13,6 +13,7 @@ import click
 import requests
 
 from . import api, appliances, auth, present
+from . import help as help_module
 
 
 def _run(action):
@@ -85,7 +86,7 @@ def _matches(appliance, needle: str) -> bool:
     return needle in appliance.name.lower() or needle in appliance.type.lower()
 
 
-@click.group(invoke_without_command=True)
+@click.group(cls=help_module.ColouredGroup, invoke_without_command=True)
 @click.option("--verbose", "-v", is_flag=True, help="Show every field with raw API key names. Ignored with --json.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.option("--appliance", "-a", default=None, help="Only show appliances matching this name or type.")
@@ -178,3 +179,6 @@ def history_command(as_json: bool) -> None:
         return
 
     click.echo(report.render(records, skipped))
+
+
+cli.add_command(help_module.help_command, name="help")
