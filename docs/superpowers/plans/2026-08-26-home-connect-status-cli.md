@@ -891,7 +891,7 @@ that change the code:
   "data": {
     "homeappliances": [
       {
-        "haId": "BOSCH-SMV000000-000000000000",
+        "haId": "000000000000000000",
         "name": "Dishwasher",
         "type": "Dishwasher",
         "brand": "Bosch",
