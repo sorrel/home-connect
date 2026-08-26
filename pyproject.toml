@@ -1,0 +1,29 @@
+[project]
+name = "home-connect"
+version = "0.1.0"
+description = "Read-only status CLI for Home Connect appliances"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+    "click>=8.0.0",
+    "requests>=2.28.0",
+    "keyring>=25.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+homeconnect = "homeconnect.cli:cli"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/homeconnect"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
