@@ -10,6 +10,11 @@ DISHWASHER = Appliance(
     brand="Bosch", vib="SMV000000", enumber="SMV000000/00", connected=True,
 )
 
+DISHWASHER_OFFLINE = Appliance(
+    ha_id="000000000000000000", name="Dishwasher", type="Dishwasher",
+    brand="Bosch", vib="SMV000000", enumber="SMV000000/00", connected=False,
+)
+
 
 class FakeClient:
     def __init__(self, responses):
@@ -130,6 +135,87 @@ def test_record_gap_writes_a_marker(tmp_path):
     assert records[0]["event"] == "coverage_gap"
     assert records[0]["from"] == "2026-08-26T23:14:02Z"
     assert records[0]["reason"] == "stream_lost"
+
+
+def test_observe_carries_state_forward_when_appliance_goes_offline(tmp_path):
+    path = tmp_path / "events.jsonl"
+    previous = {"dishwasher": {"OperationState": "Run", "Connected": True}}
+    client = FakeClient({})  # no calls should be made for an offline appliance
+
+    observed = daemon.observe(client, found=[DISHWASHER_OFFLINE], previous=previous)
+
+    assert observed["dishwasher"] == {"OperationState": "Run", "Connected": False}
+    written = daemon.record_changes(previous, observed, path, now=lambda: "T0")
+    records, _ = store.read_records(path)
+    assert written == 1
+    assert records[0]["key"] == "Connected"
+    assert records[0]["from"] is True and records[0]["to"] is False
+
+
+def test_observe_reconnect_yields_connectivity_plus_genuine_changes(tmp_path):
+    path = tmp_path / "events.jsonl"
+    previous = {"dishwasher": {"OperationState": "Run", "Connected": False}}
+    client = FakeClient({
+        "/homeappliances/000000000000000000/status": {"status": [
+            {"key": "BSH.Common.Status.OperationState",
+             "value": "BSH.Common.EnumType.OperationState.Run"},
+            {"key": "BSH.Common.Status.DoorState",
+             "value": "BSH.Common.EnumType.DoorState.Closed"},
+        ]},
+        "/homeappliances/000000000000000000/programs/active":
+            NoProgrammeActive("SDK.Error.NoProgramActive"),
+    })
+
+    observed = daemon.observe(client, found=[DISHWASHER], previous=previous)
+    written = daemon.record_changes(previous, observed, path, now=lambda: "T0")
+
+    records, _ = store.read_records(path)
+    keys_changed = {r["key"] for r in records}
+    assert written == 2
+    assert keys_changed == {"Connected", "DoorState"}
+
+
+def test_observe_without_previous_still_works():
+    client = FakeClient({
+        "/homeappliances/000000000000000000/status": {"status": []},
+        "/homeappliances/000000000000000000/programs/active":
+            NoProgrammeActive("SDK.Error.NoProgramActive"),
+    })
+
+    observed = daemon.observe(client, found=[DISHWASHER])
+
+    assert observed["dishwasher"]["Connected"] is True
+
+    offline_client = FakeClient({})
+    observed_offline = daemon.observe(offline_client, found=[DISHWASHER_OFFLINE])
+    assert observed_offline["dishwasher"] == {"Connected": False}
+
+
+def test_observe_disambiguates_colliding_status_and_option_keys():
+    client = FakeClient({
+        "/homeappliances/000000000000000000/status": {"status": [
+            {"key": "BSH.Common.Status.DoorState", "value": "closed"},
+        ]},
+        "/homeappliances/000000000000000000/programs/active": {
+            "key": "Dishcare.Dishwasher.Program.Eco50",
+            "options": [
+                {"key": "Vendor.Other.DoorState", "value": "open"},
+            ],
+        },
+    })
+
+    observed = daemon.observe(client, found=[DISHWASHER])
+
+    assert observed["dishwasher"]["DoorState"] == "closed"
+    assert observed["dishwasher"]["OptionDoorState"] == "open"
+
+
+def test_tail_reduces_non_bsh_vendor_namespaces():
+    assert daemon._tail("Dishcare.Dishwasher.Program.Eco50") == "Eco50"
+
+
+def test_tail_leaves_non_vendor_dotted_values_untouched():
+    assert daemon._tail("1.5") == "1.5"
 
 
 def test_no_record_ever_contains_the_device_serial(tmp_path):
