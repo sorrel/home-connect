@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 homeconnect = "homeconnect.cli:cli"
+homeconnect-recorder = "homeconnect.daemon:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

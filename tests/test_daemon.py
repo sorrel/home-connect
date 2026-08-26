@@ -224,3 +224,113 @@ def test_no_record_ever_contains_the_device_serial(tmp_path):
         {}, {"dishwasher": {"OperationState": "Run"}}, path, now=lambda: "T0"
     )
     assert "000000000000000000" not in path.read_text()
+
+
+class FakeStreamResponse:
+    """Mimics requests' streaming response closely enough to parse."""
+
+    def __init__(self, lines, status_code=200):
+        self.status_code = status_code
+        self._lines = list(lines)
+
+    def iter_lines(self, decode_unicode=False):
+        yield from self._lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_stream_once_folds_events_into_state(tmp_path):
+    path = tmp_path / "events.jsonl"
+    state = {"dishwasher": {"OperationState": "Ready"}}
+    response = FakeStreamResponse([
+        "event: NOTIFY",
+        'data: {"haId":"000000000000000000","items":'
+        '[{"key":"BSH.Common.Status.OperationState",'
+        '"value":"BSH.Common.EnumType.OperationState.Run"}]}',
+        "",
+    ])
+
+    class FakeSession:
+        def get(self, url, headers=None, stream=None, timeout=None):
+            return response
+
+    reason = daemon.stream_once(
+        FakeSession(), "https://example.invalid/events", "tok",
+        state, {"000000000000000000": "dishwasher"}, path, now=lambda: "T1",
+    )
+
+    records, _ = store.read_records(path)
+    assert state["dishwasher"]["OperationState"] == "Run"
+    assert records[0]["to"] == "Run"
+    assert reason == "stream_ended"
+
+
+def test_run_marks_a_gap_when_the_stream_ends(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    slept: list[float] = []
+
+    def build_client():
+        return FakeClient({
+            "/homeappliances": {"homeappliances": []},
+        })
+
+    class FakeSession:
+        def get(self, *a, **k):
+            return FakeStreamResponse([])
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=FakeSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=slept.append,
+        delays=iter([0.0, 0.0, 0.0]),
+        iterations=2,
+    )
+
+    records, _ = store.read_records(events_path)
+    gaps = [r for r in records if r.get("event") == "coverage_gap"]
+    assert len(gaps) >= 1
+    assert slept, "a reconnection must wait rather than spin"
+
+
+def test_run_persists_state_between_iterations(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    def build_client():
+        return FakeClient({
+            "/homeappliances": {"homeappliances": [{
+                "haId": "000000000000000000", "name": "Dishwasher",
+                "type": "Dishwasher", "brand": "Bosch", "vib": "SMV000000",
+                "enumber": "SMV000000/00", "connected": True,
+            }]},
+            "/homeappliances/000000000000000000/status": {"status": [
+                {"key": "BSH.Common.Status.OperationState",
+                 "value": "BSH.Common.EnumType.OperationState.Ready"},
+            ]},
+            "/homeappliances/000000000000000000/programs/active":
+                NoProgrammeActive("idle"),
+        })
+
+    class FakeSession:
+        def get(self, *a, **k):
+            return FakeStreamResponse([])
+
+    daemon.run(
+        build_client=build_client, session_factory=FakeSession,
+        events_path=events_path, state_path=state_path,
+        sleep=lambda _: None, delays=iter([0.0, 0.0, 0.0]), iterations=2,
+    )
+
+    saved = store.load_state(state_path)
+    assert saved["dishwasher"]["OperationState"] == "Ready"
+
+    records, _ = store.read_records(events_path)
+    transitions = [r for r in records if r.get("key") == "OperationState"]
+    assert len(transitions) == 1, "the same state must not be logged twice"
