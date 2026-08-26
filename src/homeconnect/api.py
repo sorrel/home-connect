@@ -35,10 +35,11 @@ class QuotaExceeded(HomeConnectError):
 class NoProgrammeActive(HomeConnectError):
     """No programme is running.
 
-    The API signals this with a 409. It is the ordinary state of an idle
-    appliance, so callers are expected to catch it rather than treat it as a
-    fault. Mistaking this for an error is the classic bug in third-party
-    Home Connect clients.
+    The API has been observed returning 404 where the documentation implies 409.
+    The error key is matched rather than the status code, as it is the reliable
+    signal. It is the ordinary state of an idle appliance, so callers are
+    expected to catch it rather than treat it as a fault. Mistaking this for an
+    error is the classic bug in third-party Home Connect clients.
     """
 
 
@@ -82,9 +83,17 @@ class Client:
         )
 
         if response.status_code == 200:
-            return response.json().get("data")
+            try:
+                payload = response.json()
+            except ValueError as e:
+                raise HomeConnectError("HTTP 200: response body not JSON") from e
+            return payload.get("data")
 
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as e:
+            raise HomeConnectError(f"HTTP {response.status_code}: response body not JSON") from e
+
         key = _error_key(payload)
 
         # Checked before the status code: an idle appliance was observed

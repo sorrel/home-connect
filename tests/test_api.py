@@ -1,11 +1,9 @@
-import json
-
 import pytest
-import requests
 
 from homeconnect.api import (
     BASE_URL,
     Client,
+    HomeConnectError,
     NoProgrammeActive,
     NotAuthorised,
     QuotaExceeded,
@@ -19,6 +17,16 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+
+class FakeBadResponse:
+    """A response where json() raises ValueError."""
+
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+    def json(self):
+        raise ValueError("Invalid JSON")
 
 
 class FakeSession:
@@ -82,6 +90,24 @@ def test_429_raises_quota_exceeded():
     client = Client(token_provider=lambda: "tok", session=session)
 
     with pytest.raises(QuotaExceeded):
+        client.get("/homeappliances")
+
+
+def test_200_with_unparseable_body_raises_error():
+    """A 200 response with invalid JSON is an error, not an empty success."""
+    session = FakeSession([FakeBadResponse(200)])
+    client = Client(token_provider=lambda: "tok", session=session)
+
+    with pytest.raises(HomeConnectError):
+        client.get("/homeappliances")
+
+
+def test_non_200_with_unparseable_body_raises_error():
+    """A non-200 response with invalid JSON is an error."""
+    session = FakeSession([FakeBadResponse(500)])
+    client = Client(token_provider=lambda: "tok", session=session)
+
+    with pytest.raises(HomeConnectError):
         client.get("/homeappliances")
 
 
