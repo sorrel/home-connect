@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import requests
 
@@ -216,6 +216,16 @@ def stream_once(
     promises, so a quiet-but-alive stream is never mistaken for a dead one
     via the socket read timeout alone.
 
+    The deadline is checked per *line*, not per parsed event: a vendor
+    keep-alive sent as a bare SSE comment (a line starting with `:`) is
+    swallowed by `parse_sse` and never surfaces as an event, so a per-event
+    check alone would miss it and the cycle would run on until the socket's
+    read timeout fired instead. This still cannot help when the stream sends
+    nothing at all — `iter_lines()` blocks on the underlying socket read
+    regardless of how eagerly a wrapping generator would like to check the
+    clock — and that residual is inherent to a blocking read, not something
+    worth engineering around here.
+
     An event naming an haId absent from `labels` is skipped rather than
     filed under a fallback label: a pseudo-appliance would be written to
     state, would not appear in the next poll's `observe()`, and every one of
@@ -234,8 +244,17 @@ def stream_once(
         return f"http_{response.status_code}"
 
     deadline = clock() + RECONCILE_SECONDS
+    hit_deadline: list[bool] = []
+
+    def lines_until_deadline() -> Iterator[str]:
+        for line in response.iter_lines(decode_unicode=True):
+            yield line
+            if clock() >= deadline:
+                hit_deadline.append(True)
+                return
+
     with response:
-        for event in stream.parse_sse(response.iter_lines(decode_unicode=True)):
+        for event in stream.parse_sse(lines_until_deadline()):
             if event["event"] != "KEEP-ALIVE" and event["data"]:
                 payload = event["data"]
                 label = labels.get(str(payload.get("haId", "")))
@@ -252,9 +271,8 @@ def stream_once(
                     # hour-old snapshot that re-logs already-recorded
                     # transitions the next time it is diffed against reality.
                     store.save_state(state, state_path)
-            if clock() >= deadline:
-                return "reconcile"
-    return "stream_ended"
+
+    return "reconcile" if hit_deadline else "stream_ended"
 
 
 def run(
@@ -326,11 +344,19 @@ def run(
                 coverage_lost_at = None
                 coverage_lost_since = None
 
+            unknown_haid_events: list[None] = []
             token = token_holder.get() if token_holder else ""
             reason = stream_once(
                 session_factory(), f"{BASE_URL}{stream.EVENTS_PATH_SUFFIX}",
                 token, state, labels, events_path, now, state_path=state_path,
+                clock=clock, on_unknown_haid=lambda: unknown_haid_events.append(None),
             )
+            if unknown_haid_events:
+                print(
+                    f"recorder: skipped {len(unknown_haid_events)} event(s) this "
+                    "cycle for an haId not in the current appliance list",
+                    file=sys.stderr,
+                )
 
             if reason == "http_401":
                 consecutive_auth_failures += 1
@@ -339,13 +365,16 @@ def run(
             else:
                 consecutive_auth_failures = 0
 
-            if reason == "reconcile":
-                healthy_stream = True
-            else:
-                healthy_stream = reason == "stream_ended"
-                if coverage_lost_at is None:
-                    coverage_lost_at = now()
-                    coverage_lost_since = clock()
+            # Only "reconcile" is a healthy ending: it is a deliberate,
+            # scheduled reconnection. "stream_ended" is a lost connection —
+            # letting it reset the backoff too would mean a server that
+            # accepts and immediately drops the connection gets hammered at
+            # the shortest delay forever, instead of the backoff escalating
+            # as it exists to do.
+            healthy_stream = reason == "reconcile"
+            if not healthy_stream and coverage_lost_at is None:
+                coverage_lost_at = now()
+                coverage_lost_since = clock()
         except NotAuthorised:
             consecutive_auth_failures += 1
             if token_holder:

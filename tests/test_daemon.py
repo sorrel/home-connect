@@ -383,7 +383,7 @@ def test_run_reconcile_ending_never_starts_a_gap(tmp_path, monkeypatch):
     assert not clock_calls, "a reconcile ending must never touch the gap clock"
 
 
-def test_run_resets_backoff_after_a_healthy_cycle(tmp_path, monkeypatch):
+def test_run_resets_backoff_after_a_reconcile_cycle(tmp_path, monkeypatch):
     events_path = tmp_path / "events.jsonl"
     state_path = tmp_path / "state.json"
     slept: list[float] = []
@@ -391,7 +391,9 @@ def test_run_resets_backoff_after_a_healthy_cycle(tmp_path, monkeypatch):
     def build_client():
         return FakeClient({"/homeappliances": {"homeappliances": []}})
 
-    monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: "stream_ended")
+    # "reconcile" is the only ending that counts as healthy: it is a
+    # deliberate, scheduled reconnection, not a lost one.
+    monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: "reconcile")
 
     daemon.run(
         build_client=build_client,
@@ -429,6 +431,36 @@ def test_run_backoff_advances_across_unhealthy_cycles(tmp_path, monkeypatch):
     )
 
     assert slept == [1.0, 2.0], "an unhealthy cycle must not reset the backoff"
+
+
+def test_run_backoff_escalates_across_repeated_stream_ended_cycles(
+    tmp_path, monkeypatch
+):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    slept: list[float] = []
+
+    def build_client():
+        return FakeClient({"/homeappliances": {"homeappliances": []}})
+
+    # A connection that is accepted and then immediately dropped, repeatedly,
+    # must not be treated as healthy — that would disable the backoff in
+    # exactly the failure mode it exists for, and hammer an unhappy server.
+    monkeypatch.setattr(daemon, "stream_once", lambda *a, **k: "stream_ended")
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=slept.append,
+        delays=daemon.stream.backoff_delays(
+            initial=1.0, factor=2.0, jitter=lambda delay: delay
+        ),
+        iterations=3,
+    )
+
+    assert slept == [1.0, 2.0], "a lost connection must escalate, not stay constant"
 
 
 def test_run_invalidates_token_after_a_single_401_and_refreshes(tmp_path, monkeypatch):
@@ -563,6 +595,35 @@ def test_stream_once_skips_events_for_an_unrecognised_haid(tmp_path):
     assert reason == "stream_ended"
 
 
+def test_run_logs_unrecognised_haid_events(tmp_path, monkeypatch, capsys):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    def build_client():
+        return FakeClient({"/homeappliances": {"homeappliances": []}})
+
+    def fake_stream_once(*args, **kwargs):
+        on_unknown_haid = kwargs["on_unknown_haid"]
+        on_unknown_haid()
+        on_unknown_haid()
+        return "stream_ended"
+
+    monkeypatch.setattr(daemon, "stream_once", fake_stream_once)
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        iterations=1,
+    )
+
+    err = capsys.readouterr().err
+    assert "2" in err, "the count must actually reach the log, not just the counter"
+
+
 def test_stream_once_persists_state_after_each_event(tmp_path):
     path = tmp_path / "events.jsonl"
     state_path = tmp_path / "state.json"
@@ -612,17 +673,81 @@ def test_stream_once_returns_reconcile_after_the_duration_bound(tmp_path):
         def get(self, *a, **k):
             return response
 
-    clock_values = iter([0.0, 0.0, float(daemon.RECONCILE_SECONDS)])
+    # The deadline is now checked once per line (six lines here), not once
+    # per parsed event, so the clock must stay under the deadline for every
+    # line except the last.
+    calls = [0]
+
+    def clock() -> float:
+        calls[0] += 1
+        return float(daemon.RECONCILE_SECONDS) if calls[0] > 6 else 0.0
 
     reason = daemon.stream_once(
         FakeSession(), "https://example.invalid/events", "tok",
         state, {"000000000000000000": "dishwasher"}, path, now=lambda: "T1",
-        state_path=state_path, clock=lambda: next(clock_values),
+        state_path=state_path, clock=clock,
     )
 
     assert reason == "reconcile"
     assert state["dishwasher"]["OperationState"] == "Run"
     assert state["dishwasher"]["DoorState"] == "Open"
+
+
+def test_stream_once_checks_the_deadline_on_a_comment_only_line(tmp_path):
+    """A bare SSE comment (a vendor keep-alive) never becomes an event, but
+    the deadline must still be checked against it — otherwise a stream that
+    keeps itself alive only with comments would never reconcile."""
+    path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    state: dict = {}
+    response = FakeStreamResponse([":keep-alive"])
+
+    class FakeSession:
+        def get(self, *a, **k):
+            return response
+
+    clock_values = iter([0.0, float(daemon.RECONCILE_SECONDS)])
+
+    reason = daemon.stream_once(
+        FakeSession(), "https://example.invalid/events", "tok",
+        state, {}, path, now=lambda: "T1",
+        state_path=state_path, clock=lambda: next(clock_values),
+    )
+
+    assert reason == "reconcile"
+
+
+def test_run_forwards_its_clock_to_stream_once(tmp_path, monkeypatch):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    def build_client():
+        return FakeClient({"/homeappliances": {"homeappliances": []}})
+
+    captured: dict = {}
+
+    def fake_stream_once(*args, **kwargs):
+        captured["clock"] = kwargs.get("clock")
+        return "stream_ended"
+
+    monkeypatch.setattr(daemon, "stream_once", fake_stream_once)
+
+    sentinel_clock = lambda: 0.0  # noqa: E731
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        clock=sentinel_clock,
+        iterations=1,
+    )
+
+    assert captured["clock"] is sentinel_clock, (
+        "run()'s own clock must reach stream_once, not the real time.monotonic"
+    )
 
 
 def test_run_persists_state_between_iterations(tmp_path):
