@@ -41,7 +41,7 @@ def parse_sse(lines: Iterable[str]) -> Iterator[dict]:
     def flush() -> dict | None:
         if name is None and not body:
             return None
-        return {"event": name or "message", "data": _decode("".join(body))}
+        return {"event": name or "message", "data": _decode("\n".join(body))}
 
     for line in lines:
         line = line.rstrip("\n").rstrip("\r")

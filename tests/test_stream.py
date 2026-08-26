@@ -54,6 +54,29 @@ def test_multi_line_data_is_concatenated():
     assert events[0]["data"] == {"items": []}
 
 
+def test_multi_line_data_join_uses_newline_separator():
+    """The SSE specification joins multi-line data fields with '\\n'.
+
+    "1" and "2" concatenated with no separator parse as the integer 12; joined
+    with a newline, "1\\n2" is not a single valid JSON document, so a
+    spec-compliant join must yield None here.
+    """
+    events = list(stream.parse_sse(["event: NOTIFY", "data: 1", "data: 2", ""]))
+    assert events[0]["data"] is None
+
+
+def test_data_null_is_valid_json_but_not_an_object():
+    events = list(stream.parse_sse(["event: NOTIFY", "data: null", ""]))
+    assert events[0]["event"] == "NOTIFY"
+    assert events[0]["data"] is None
+
+
+def test_data_list_is_valid_json_but_not_an_object():
+    events = list(stream.parse_sse(["event: NOTIFY", "data: [1, 2, 3]", ""]))
+    assert events[0]["event"] == "NOTIFY"
+    assert events[0]["data"] is None
+
+
 def test_extract_changes_pulls_key_value_pairs():
     payload = {"items": [
         {"key": "BSH.Common.Status.OperationState", "value": "Run"},
