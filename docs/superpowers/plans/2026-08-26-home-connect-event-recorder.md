@@ -1627,3 +1627,160 @@ uv run pytest -q
 git add launchd .gitignore README.md CLAUDE.md
 git commit -m "feat: add launchd agent for the recorder, and document it"
 ```
+
+---
+
+### Task 7: Coloured, boxed help
+
+**Files:**
+- Create: `src/homeconnect/help.py`
+- Create: `tests/test_help.py`
+- Modify: `src/homeconnect/cli.py` (use the group class, register the command)
+- Modify: `tests/test_cli.py`
+
+**Interfaces:**
+- Consumes: `present.display_width`.
+- Produces:
+  - `class ColouredGroup(click.Group)` — coloured usage/options/commands, plus did-you-mean suggestions on an unknown command
+  - `@dataclass Section` with `name: str`, `blurb: str`, `entries: list[tuple[str, str]]`
+  - `SECTIONS: list[Section]`
+  - `def render_section(section: Section, width: int = 78) -> str`
+  - `def render_reference(width: int = 78) -> str`
+  - `help_command` — the `help` Click command
+
+**Design notes.**
+
+Match the house style of the sibling `hue-control` tool: cyan bold headings,
+green command names, dim white descriptions, box-drawing rules. Two deliberate
+departures from it:
+
+1. **Continuation lines align under the description column.** In the sibling
+   tool a long description wraps to column 2, which breaks the list up and is
+   hard to read. Wrap to the description's own indent instead.
+2. **Widths are computed with `display_width()`, never `len()`.** Box-drawing
+   characters and any symbol beyond ASCII count as one character but may occupy
+   two columns; `len()` is what makes these boxes ragged. This is a standing
+   rule in this codebase.
+
+The reference is **data** (`SECTIONS`), not hand-drawn ASCII, so adding a
+command later does not mean redrawing a box by hand.
+
+- [ ] **Step 1: Write the failing tests**
+
+`tests/test_help.py`:
+
+```python
+import re
+
+from homeconnect import help as help_module
+from homeconnect.present import display_width
+
+
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def test_every_section_has_entries():
+    assert help_module.SECTIONS
+    for section in help_module.SECTIONS:
+        assert section.name
+        assert section.entries, f"{section.name} has no entries"
+
+
+def test_reference_mentions_each_command():
+    text = strip_ansi(help_module.render_reference())
+    for section in help_module.SECTIONS:
+        for command, _description in section.entries:
+            assert command in text
+
+
+def test_box_rules_are_all_the_same_display_width():
+    """len() on box-drawing characters is what makes these ragged."""
+    lines = strip_ansi(help_module.render_reference()).splitlines()
+    rules = [line for line in lines if line.startswith(("╔", "╚", "║"))]
+    assert rules, "expected a box"
+    widths = {display_width(line) for line in rules}
+    assert len(widths) == 1, f"box edges are ragged: {widths}"
+
+
+def test_long_descriptions_wrap_under_the_description_column():
+    section = help_module.Section(
+        name="TEST", blurb="", entries=[("cmd", "word " * 40)]
+    )
+    lines = [
+        line
+        for line in strip_ansi(help_module.render_section(section, width=60)).splitlines()
+        if line.strip()
+    ]
+    entry_lines = [line for line in lines if "word" in line]
+    assert len(entry_lines) > 1, "expected the description to wrap"
+    indents = {len(line) - len(line.lstrip()) for line in entry_lines[1:]}
+    first_description_column = entry_lines[0].index("word")
+    assert indents == {first_description_column}
+
+
+def test_reference_states_what_the_api_cannot_provide():
+    """Recorded in the help so nobody goes hunting for it later."""
+    text = strip_ansi(help_module.render_reference()).lower()
+    assert "energy" in text
+    assert "read-only" in text
+```
+
+Add to `tests/test_cli.py`:
+
+```python
+def test_help_command_runs():
+    result = CliRunner().invoke(cli_module.cli, ["help"])
+    assert result.exit_code == 0
+    assert "Quick Reference" in result.output
+
+
+def test_unknown_command_suggests_a_similar_one():
+    result = CliRunner().invoke(cli_module.cli, ["histry"])
+    assert result.exit_code != 0
+    assert "history" in result.output
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `uv run pytest tests/test_help.py -v`
+Expected: FAIL with `ModuleNotFoundError: No module named 'homeconnect.help'`
+
+- [ ] **Step 3: Write `src/homeconnect/help.py`**
+
+Implement `Section`, `SECTIONS`, `render_section`, `render_reference`,
+`ColouredGroup` and `help_command` to satisfy the tests above and the design
+notes. `SECTIONS` covers, in this order:
+
+- **STATUS** — what the appliances are doing right now: the bare command,
+  `--verbose`, `--json`, `-a`
+- **HISTORY** — what the recorder has observed: `homeconnect history`,
+  `homeconnect history --json`
+- **RECORDER** — the background listener: `launchd/install.sh`,
+  `launchd/uninstall.sh`, `homeconnect-recorder` (foreground, for debugging)
+- **SETUP** — one-off: `homeconnect auth`
+
+with a closing note that the tool is read-only by construction, and that
+energy, water and cycle counts are not available from the API at all.
+
+`ColouredGroup` overrides `format_usage`, `format_options`, `format_commands`
+and `resolve_command`, matching the sibling tool's palette: cyan bold headings,
+green names, dim white descriptions. On an unknown command, suggest the closest
+matches by a simple similarity score rather than raising Click's bare error.
+
+- [ ] **Step 4: Wire it into `src/homeconnect/cli.py`**
+
+Change the group decorator to use `cls=ColouredGroup`, and register
+`help_command` as `help`. Change nothing else about the CLI's behaviour.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `uv run pytest -q`
+Expected: all pass
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/homeconnect/help.py tests/test_help.py src/homeconnect/cli.py tests/test_cli.py
+git commit -m "feat: add coloured, boxed help with command suggestions"
+```
