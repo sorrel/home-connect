@@ -44,6 +44,13 @@ full design record, including the live-probe findings that shaped it.
   `data/events.jsonl` has no source of truth to rebuild from — the vendor
   API exposes no history. Nothing in this codebase, including
   `launchd/uninstall.sh`, deletes it.
+- **`data/recorder.log` and `data/recorder.err` are not rotated.** The
+  LaunchAgent points `StandardOutPath`/`StandardErrorPath` straight at these
+  files with no size or age limit, and this is meant to run for months. No
+  rotation mechanism has been built — that would be disproportionate for a
+  single-process background tool — so if the recorder ever enters a restart
+  loop these files will grow quickly. They are the first place to look when
+  something is wrong.
 - **British English** throughout — code comments, variable and function
   names, CLI output, commit messages, documentation.
 - **Never commit directly to `main`.** Always work on a feature branch.
