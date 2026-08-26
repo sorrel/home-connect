@@ -1,153 +1,108 @@
-# Home Connect status CLI
+# home-connect
 
-A small, local, **read-only** command-line tool that answers one question on
-demand: what is the dishwasher doing, and does it need anything? One command,
-one glance, no daemon, no background process.
+A read-only command-line tool for Home Connect appliances (Bosch, Siemens, Neff
+and other BSH brands). It reports what an appliance is doing, and optionally
+records state changes over time.
 
-It is built to generalise to other Home Connect appliances over time — the
-plumbing is appliance-agnostic, and only the presentation layer knows what a
-dishwasher is — but a dishwasher is the only appliance it has been used
-against so far.
+It cannot start, stop, or configure an appliance. The OAuth token is requested
+with read-only scopes, so a write would be refused by the server even if the
+code attempted one, and no write verb exists in the codebase.
 
-## What this is not
+## What it can and cannot tell you
 
-- **Not a controller.** There is no way to start, stop, pause or otherwise
-  change an appliance, and no such command is planned. This is enforced
-  twice: the authorisation token is requested with only the `IdentifyAppliance`
-  and `Monitor` scopes — both read-only — so a write request would be refused
-  by the server regardless of what the code did, and on top of that, no
-  POST/PUT/DELETE call exists anywhere in the codebase.
-- **Not a settings viewer.** The `Settings` scope is deliberately never
-  requested. Home Connect has no read-only settings scope — `Settings` grants
-  read *and* modify together — so reading things like power state or child
-  lock is not worth holding a token that could also change them.
-- **Not an energy or water monitor, and never will be from this API.** The
-  Home Connect app shows energy use, water use, cycle counts and run history
-  under "Easy Access", but no documented endpoint exposes any of it, for any
-  appliance. This was confirmed by probing the live API, not assumed from the
-  documentation. Do not go looking for it — it is not there to find.
-- **Not able to report salt, rinse aid or machine-care warnings.** These read
-  like they should be ordinary status fields, but they are not: asking the
-  API for any of `Dishcare.Dishwasher.Event.SaltNearlyEmpty`,
-  `...RinseAidNearlyEmpty` or `...MachineCareReminder` as a status returns
-  `409 SDK.Error.UnsupportedStatus`. They exist only as change-only events on
-  the server-sent-events stream, which nothing in this tool subscribes to. A
-  command that runs once and exits cannot see them — this was the headline
-  feature the tool was originally wanted for, and it turned out not to be
-  obtainable on demand. Seeing it would need a long-running listener, which is
-  a deliberately separate piece of work (see "Deferred: an event listener"
-  below), not something to bolt on quietly.
+**Available:** operation state (idle, running, finished), door state, the active
+programme and its options, remaining time and progress, and whether an appliance
+is reachable.
 
-## What it does show
+**Not available, from the API at all:** energy use, water use, cycle counts, and
+run history. The Home Connect app displays these, but no documented endpoint
+exposes them. The recorder below is the only route to comparable figures, by
+observing over time.
 
-- Running / idle / finished / error, from `BSH.Common.Status.OperationState`
-- Door open, closed or locked
-- Which programme is active, its options, remaining time and progress
-- Whether the appliance is online at all
+**Not available on demand:** salt, rinse aid and machine-care reminders. These
+are not status values — the API returns `SDK.Error.UnsupportedStatus` for each —
+and exist only as events on a change-only stream. A command that is not already
+listening cannot see them.
+
+## Requirements
+
+- Python 3.12 or later, and [uv](https://docs.astral.sh/uv/)
+- macOS (the refresh token is stored in the Keychain)
+- A Home Connect account with at least one paired appliance
 
 ## Setup
 
-This follows the same pattern as the other tools in this workspace:
-credentials live in a 1Password Environment, never on disk as plaintext.
-
-1. **Register an application** at the Home Connect developer portal. Set
-   **OAuth Flow to Device Flow** — the portal states this cannot be changed
-   afterwards, so get it right at creation — and leave **One Time Token
-   Mode** off.
-2. **Create a 1Password Environment** (e.g. named "Home Connect") holding two
-   variables: `HOMECONNECT_CLIENT_ID` and `HOMECONNECT_CLIENT_SECRET` (the
-   secret is optional — only set it if the registered application has one).
-3. **Mount the environment's local `.env` destination** to this repository's
-   root as `.env` (gitignored, never committed).
-4. **Run the one-off authorisation:**
+1. Register an application at
+   [developer.home-connect.com](https://developer.home-connect.com) with **OAuth
+   Flow: Device Flow**. The portal states this cannot be changed afterwards.
+   Leave One Time Token Mode off.
+2. Put the client ID and secret in the environment as `HOMECONNECT_CLIENT_ID`
+   and `HOMECONNECT_CLIENT_SECRET`. A `.env` file in the repository root is
+   read if present; it is gitignored.
+3. Authorise this machine once:
 
    ```bash
    uv run homeconnect auth
    ```
 
-   This shows a short code and a URL. Open the URL in a browser, sign in
-   with the Home Connect account the appliance is paired to, and enter the
-   code. Once approved, the refresh token is stored in the macOS Keychain.
-   Access tokens are then refreshed silently on every run — you should not
-   need to repeat this step unless the stored credential is revoked.
+   You are shown a code to enter in a browser. The resulting refresh token is
+   stored in the macOS Keychain and refreshed silently thereafter.
 
-**Note on the registered application:** it stays in *development* state on
-the developer portal, which binds it to the single Home Connect account used
-to authorise it. That is fine for personal use. Serving more than one account
-would require going through the portal's production-approval process, which
-this project has not done and has no plan to do.
+An application registered this way stays in *development* state and works only
+with the Home Connect account named on it. Serving other accounts requires the
+portal's production-approval process.
 
 ## Usage
 
 ```bash
-# One-line verdict for every appliance on the account
-uv run homeconnect
-
-# Every field, with raw API key names — useful for debugging
-uv run homeconnect --verbose
-
-# Machine-readable output
-uv run homeconnect --json
-
-# Only appliances matching this name or type (case-insensitive substring)
-uv run homeconnect --appliance dishwasher
-
-# One-off authorisation (see Setup)
-uv run homeconnect auth
+uv run homeconnect                 # one-line verdict per appliance
+uv run homeconnect --verbose       # every field, with raw API key names
+uv run homeconnect --json          # machine-readable
+uv run homeconnect -a dishwasher   # filter by name or type
+uv run homeconnect history         # what the recorder has observed
 ```
 
-Example output, bare:
+## The recorder
 
-```
-$ homeconnect
-Dishwasher  running Eco 50  47 min left
-```
+`homeconnect-recorder` holds the appliance event stream open and appends each
+observed state change to `data/events.jsonl`, one JSON object per line. It polls
+periodically to re-establish ground truth after any interruption.
 
-Example output, verbose:
+It records transitions, not readings, so an uneventful hour produces no lines.
 
-```
-$ homeconnect --verbose
-Dishwasher (Bosch SMV6ZCX01G)
-  Programme                               Dishcare.Dishwasher.Program.Eco50
-  BSH.Common.Option.ProgramProgress       38
-  BSH.Common.Option.RemainingProgramTime  2820
-  BSH.Common.Status.DoorState             BSH.Common.EnumType.DoorState.Closed
-  BSH.Common.Status.OperationState        BSH.Common.EnumType.OperationState.Run
-  BSH.Common.Status.RemoteControlActive   True
-```
+Because it cannot watch while the machine is asleep or offline, every loss of
+coverage is written to the log as a marker. `homeconnect history` reports a
+value as `unknown` when its most recent information predates a gap, rather than
+as `ok` — silence in the log means nobody was watching, not that nothing
+happened.
 
-Verbose deliberately prints the **raw API key names**, not friendly labels:
-its job is debugging, and the key is what you would search the API
-documentation for. Values are raw too — `RemainingProgramTime` is in seconds.
-`--verbose` has no effect alongside `--json`, which always emits the full
-payload.
-
-An idle appliance is shown as such, not as an error — a `404` on the active
-programme is the ordinary resting state of a machine with nothing running,
-not a fault, even though older Home Connect documentation says to expect
-`409` there.
-
-An unrecognised appliance type still produces useful output: it falls back to
-a generic view of the shared `BSH.Common.*` fields rather than failing.
-
-## Development
+To run it in the background, restarting at login:
 
 ```bash
-uv sync
-uv run pytest
+launchd/install.sh      # install and start
+launchd/uninstall.sh    # stop and remove
 ```
 
-The test suite runs entirely against recorded JSON fixtures under
-`tests/fixtures/` — it never makes a live API call, and running it does not
-touch the real appliance or spend API quota.
+## Data
 
-## Deferred: an event listener
+Everything stays local. `data/` holds the event log and last-known state, and is
+gitignored. Credentials are never written to disk by this tool: the client ID
+and secret come from the environment, and the refresh token lives in the
+Keychain.
 
-Salt, rinse aid, machine care, and any kind of run history or usage
-statistics all require something that is already listening when the change
-happens — a background process subscribed to the SSE stream, with its own
-small local store, quite different in shape from this on-demand CLI. That is
-a genuinely separate project with its own design questions (an always-on
-host, reconnect-with-backoff, "unknown" as a distinct state from "fine"), and
-is deliberately not part of this one. If it is ever built, it gets its own
-specification rather than growing quietly out of this tool.
+## Rate limits
+
+The API allows roughly 1000 calls per day. A status command spends about three;
+the recorder spends a similar number per reconciliation.
+
+## Tests
+
+```bash
+uv run pytest -q
+```
+
+The suite is fully mocked and never contacts the API.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

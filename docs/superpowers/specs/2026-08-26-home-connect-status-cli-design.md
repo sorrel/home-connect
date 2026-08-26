@@ -31,7 +31,7 @@ only the presentation layer knows what a dishwasher is.
 
 ## What the API actually gives us
 
-Confirmed against the official OpenAPI spec (`hcsdk-production.yaml`) and the
+Confirmed against the official OpenAPI spec (published at https://api-docs.home-connect.com/) and the
 key documentation.
 
 **Available:**

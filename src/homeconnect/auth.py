@@ -33,7 +33,7 @@ TOKEN_URL = "https://api.home-connect.com/security/oauth/token"
 #: appliance whose haId is already known; *listing* appliances is a separate
 #: right, `IdentifyAppliance`. With `Monitor` alone, GET /homeappliances returns
 #: 403 — confirmed against the live API, and pinned per-endpoint in the OpenAPI
-#: spec at docs/hcsdk-production.yaml. Both scopes are read-only.
+#: spec at https://api-docs.home-connect.com/ . Both scopes are read-only.
 SCOPE = "IdentifyAppliance Monitor"
 
 KEYRING_SERVICE = "home-connect"
