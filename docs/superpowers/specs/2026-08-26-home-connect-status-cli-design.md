@@ -113,20 +113,22 @@ touching nothing else.
 
 ```
 $ homeconnect
-Dishwasher  running Eco 50  47 min left  ⚠ salt low
+Dishwasher  running Eco 50  47 min left
 
 $ homeconnect --verbose
 Dishwasher (Bosch SMV6ZCX01G)
-  Operation      Run
-  Door           Closed
-  Programme      Dishcare.Dishwasher.Program.Eco50
-  Progress       38%
-  Remaining      00:47:00
-  Options        Half Load, Extra Dry
-  Salt           ⚠ nearly empty
-  Rinse aid      ok
-  Machine care   not due
+  Programme                               Dishcare.Dishwasher.Program.Eco50
+  BSH.Common.Option.ProgramProgress       38
+  BSH.Common.Option.RemainingProgramTime  2820
+  BSH.Common.Status.DoorState             BSH.Common.EnumType.DoorState.Closed
+  BSH.Common.Status.OperationState        BSH.Common.EnumType.OperationState.Run
+  BSH.Common.Status.RemoteControlActive   True
 ```
+
+Verbose prints raw API key names and raw values — it is a debugging view, and
+the key is what you would search the documentation for. No salt, rinse-aid or
+machine-care line appears: as the findings below record, those are not status
+fields at all, so an on-demand command cannot show them.
 
 Terminal alignment uses a `display_width()` helper, not `len()` — the warning
 glyphs are double-width and `len()` will misalign the columns.
@@ -137,7 +139,7 @@ glyphs are double-width and `len()` will misalign the columns.
 |---|---|
 | `409` on `/programs/active` | Normal idle state, not an error. This is the single most common bug in third-party clients. |
 | `connected: false` | Report the appliance as offline; do not attempt further calls on it. |
-| `401` | Refresh the token once, retry once, then fail with a clear message. |
+| `401` | Fail with a clear message. The access token is fetched once per run (it is valid for 24 hours, and each mint rotates the stored refresh token), and a run lasts seconds, so a mid-run expiry is not a real case; a rejected token surfaces as guidance to run `homeconnect auth` again. |
 | `429` | Report the quota plainly. The daily limit is roughly 1000 calls; this tool spends about four per run. |
 | No credentials yet | Point the user at the one-off `homeconnect auth` step rather than a stack trace. |
 
@@ -257,4 +259,48 @@ for building it.
 
 **Scope note.** Phase 2 gets its own spec and plan. It must not be folded into
 this project, whose whole value is being small enough to trust.
+
+## Requested addition: a JSONL transition log (26 August 2026)
+
+Requested during implementation: build up a JSONL file recording when events
+happened, with their dates — "like the tado battery levels".
+
+**Note on the comparison.** `tado-data` does not use JSONL. It keeps a state
+file (`stored_data/battery_history.json`) holding, per device, `good_since` and
+`low_since` dates — a record of *transitions*, not of every reading. The request
+is read as wanting that idea in append-only JSONL form: one line per observed
+change, never rewritten. Confirm before building.
+
+**This cannot be done by the on-demand CLI.** A transition is only recorded if
+something is watching when it occurs. Tado batteries tolerate sparse polling
+because they change over months; a dishwasher cycle runs for a few hours and
+recurs daily, so occasional CLI runs would catch a scattering of states and miss
+most cycles entirely.
+
+**It therefore needs a scheduled process — but a polling one, not the SSE
+listener described in the phase 2 section above.** Polling is the better fit
+here, and supersedes SSE as the recommended first move:
+
+- Everything a transition log can usefully record — cycle start and end,
+  programme used, duration, door state — lives in `/status` and
+  `/programs/active`, which polling reads directly.
+- Salt, rinse aid and machine care remain invisible at any polling frequency:
+  they are not status keys at all. Only SSE carries them.
+- Polling self-heals after downtime; the change-only stream does not.
+- Polling needs a loop and a state diff. SSE needs reconnection, backoff, and
+  a token refresh mid-stream.
+
+**Quota.** Roughly three calls per poll against a limit of about 1000 a day: a
+ten-minute interval costs ~430 calls, comfortably inside it. Five minutes
+(~860) is close to the ceiling and leaves no headroom for CLI use.
+
+**Payoff.** This is the only route to the run statistics the API refuses to
+expose — how often the machine runs, which programmes, how long they take.
+That was wanted from the outset and was recorded above as unobtainable; it is
+obtainable this way, just not from the API directly.
+
+**Sequencing.** Not folded into this plan. The CLI's `appliances.fetch_state`
+already returns clean dataclasses and the CLI already emits them as JSON, so a
+recorder reuses rather than duplicates. It gets its own spec and plan once the
+CLI is finished.
 
