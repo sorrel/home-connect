@@ -69,10 +69,14 @@ def list_appliances(client: Any) -> list[Appliance]:
         ha_id = record.get("haId")
         if not ha_id:
             continue
+        # Fall back to the type, never to the haId: the haId is a device
+        # serial, and the name reaches both the display and — via
+        # `daemon.label_for` — the event log, which promises not to carry it.
+        kind = record.get("type") or "Unknown"
         found.append(Appliance(
             ha_id=ha_id,
-            name=record.get("name", ha_id),
-            type=record.get("type", "Unknown"),
+            name=record.get("name") or kind,
+            type=kind,
             brand=record.get("brand", ""),
             vib=record.get("vib", ""),
             enumber=record.get("enumber", ""),

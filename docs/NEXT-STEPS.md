@@ -1,7 +1,7 @@
 # Next steps
 
 State as of 26 August 2026. Both the status CLI and the event recorder are
-built, reviewed, published and running. 181 tests pass; CI is green.
+built, reviewed, published and running. 182 tests pass; CI is green.
 
 ## Do this first
 
@@ -36,23 +36,18 @@ having been closed.
 ## Residual minors, in the order worth fixing
 
 None blocks use. All were found by the final whole-branch review and judged
-acceptable to defer.
+acceptable to defer. The first of them — an unnamed appliance logging its
+serial as its label — has since been fixed.
 
-1. **An unnamed appliance would log its serial.** `appliances.list_appliances`
-   falls back to `name = ha_id`, so an appliance with no friendly name would
-   have its serial written into the event log as the label — contradicting the
-   deliberate promise in `label_for` that the haId never reaches the log. The
-   dishwasher is named, so this does not currently trigger. A one-line fix, and
-   the one worth taking first.
-2. **Installed non-editably, the data directory resolves oddly.**
+1. **Installed non-editably, the data directory resolves oddly.**
    `default_data_dir()` anchors on `Path(__file__).parents[2]`, which is right
    for a repository checkout but points inside the interpreter's tree for a
    non-editable install. `HOMECONNECT_DATA_DIR` overrides it and must be set
    before import, since `DATA_DIR` is module-level.
-3. **A locked Keychain retries every minute.** The recorder exits 4 and launchd
+2. **A locked Keychain retries every minute.** The recorder exits 4 and launchd
    restarts it after its 60-second throttle, appending guidance to
    `recorder.err` each time. Bounded, but noisier than it needs to be.
-4. **Two cycles beginning in the same second** could attribute a programme to
+3. **Two cycles beginning in the same second** could attribute a programme to
    the wrong one. Not a real scenario for a dishwasher.
 
 ## Possible future work

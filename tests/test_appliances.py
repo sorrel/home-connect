@@ -156,3 +156,22 @@ def test_a_non_list_payload_yields_no_appliances():
             return {"homeappliances": None}
 
     assert appliances.list_appliances(FakeClient()) == []
+
+
+def test_an_unnamed_appliance_falls_back_to_its_type_not_its_serial():
+    """The haId is a device serial and must never become the label.
+
+    `daemon.label_for` writes this value into the event log, which is meant to
+    be pasteable into a bug report. Falling back to the haId here would have
+    smuggled the serial past that promise.
+    """
+    class FakeClient:
+        def get(self, path):
+            return {"homeappliances": [
+                {"haId": "000000000000000000", "type": "Oven", "connected": True},
+            ]}
+
+    appliance = appliances.list_appliances(FakeClient())[0]
+
+    assert appliance.name == "Oven"
+    assert appliance.ha_id not in appliance.name
