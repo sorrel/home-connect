@@ -173,7 +173,9 @@ def auth_command() -> None:
 
 @cli.command(name="history")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
-def history_command(as_json: bool) -> None:
+@click.option("-x", "--expanded", is_flag=True,
+              help="The complete record: every alert arrival, with intervals.")
+def history_command(as_json: bool, expanded: bool) -> None:
     """Report on what the recorder has observed."""
     from . import report, store
 
@@ -182,13 +184,17 @@ def history_command(as_json: bool) -> None:
     if as_json:
         click.echo(json.dumps({
             "cycles": [vars(c) for c in report.cycles(records)],
-            "consumables": [vars(c) for c in report.consumables(records)],
+            "alerts": [
+                {"name": a.name, "occurrences": list(a.occurrences),
+                 "intervals_days": report.intervals_days(a.occurrences)}
+                for a in report.alerts(records)
+            ],
             "gaps": report.coverage(records)[0],
             "skipped": skipped,
         }, indent=2))
         return
 
-    click.echo(report.render(records, skipped))
+    click.echo(report.render(records, skipped, expanded=expanded))
 
 
 cli.add_command(help_module.help_command, name="help")

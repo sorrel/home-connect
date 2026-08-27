@@ -35,17 +35,27 @@ full design record, including the live-probe findings that shaped it.
   Do not run `launchd/install.sh`, `launchd/uninstall.sh`, `launchctl load`,
   or `homeconnect-recorder` as a way of checking this codebase; the recorder
   is exercised only through its unit tests.
-- **Coverage honesty is load-bearing.** `report.py` marks anything whose
-  last news predates the most recent `coverage_gap` as `unknown`, never
-  `ok`. Do not "fix" a gap-heavy report by loosening this — an uneventful
-  hour and an unwatched hour must never be allowed to look the same in the
-  log or in what `homeconnect history` prints.
+- **Coverage honesty is load-bearing.** An uneventful hour and an unwatched
+  hour must never be allowed to look the same, in the log or in what
+  `homeconnect history` prints. Where `coverage_gap` records exist, `report.py`
+  declares every alert count a floor, because an alert that fired whilst
+  nothing was listening was never seen. Do not "fix" a gap-heavy report by
+  loosening this.
+- **Alerts are arrivals, never a state.** The API sends no all-clear: salt
+  reports that it is low and nothing is ever sent to say it was refilled. So
+  `report.alerts()` records *when* each alert fired and nothing else, and
+  `homeconnect history` never prints `ok` for a consumable — an earlier
+  version derived one from the absence of "Present", which is a claim the API
+  cannot support. The full arrival record, and the intervals between
+  arrivals, are what `history -x` exists to show; this is also why the event
+  log is never pruned.
 - **Some keys can only ever arrive on the stream.** `store.EVENT_ONLY_KEYS`
   names them: the three consumables and `SelectedProgramme`. A poll cannot
   read any of them, so `daemon.observe()` carries them forward from
   last-known state instead of rebuilding them. Removing that carry-forward
   reintroduces the worst bug this codebase has had — an hourly poll writing
-  `SaltNearlyEmpty: "Present" -> null`, which the report reads as `ok`.
+  `SaltNearlyEmpty: "Present" -> null`, an arrival the appliance never sent
+  and the report cannot tell from a real one.
 - **One concept, one name in the log.** The poll writes `Programme`; the
   stream says `ActiveProgram`. `daemon._STREAM_KEY_ALIASES` folds stream keys
   onto the poll's namespace as events are applied. Anything added to one
@@ -92,8 +102,9 @@ src/homeconnect/
                   repository root, or `HOMECONNECT_DATA_DIR` if set
   daemon.py       the recorder loop: seed, listen, reconcile, mark gaps;
                   the `homeconnect-recorder` console-script entry point
-  report.py       turns the event log into answers (`homeconnect history`),
-                  honest about what a coverage gap makes unknown
+  report.py       turns the event log into answers (`homeconnect history`,
+                  and `-x` for the full alert record with intervals), honest
+                  about what a coverage gap leaves unseen
 launchd/
   com.homeconnect.recorder.plist   tracked template; __REPO__ placeholder,
                                     no real path

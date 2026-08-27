@@ -43,7 +43,8 @@ SECTIONS: list[Section] = [
         name="HISTORY",
         blurb="What the recorder has observed over time.",
         entries=[
-            ("homeconnect history", "Report on cycles, consumables and coverage gaps."),
+            ("homeconnect history", "Report on cycles, alerts and coverage gaps."),
+            ("homeconnect history -x", "The complete alert record, with intervals."),
             ("homeconnect history --json", "Machine-readable history."),
         ],
     ),
