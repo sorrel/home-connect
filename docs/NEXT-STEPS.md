@@ -1,7 +1,7 @@
 # Next steps
 
 State as of 26 August 2026. Both the status CLI and the event recorder are
-built, reviewed, published and running. 181 tests pass; CI is green.
+built, reviewed, published and running. 182 tests pass; CI is green.
 
 ## Do this first
 
@@ -36,35 +36,37 @@ having been closed.
 ## Residual minors, in the order worth fixing
 
 None blocks use. All were found by the final whole-branch review and judged
-acceptable to defer.
+acceptable to defer. The first of them — an unnamed appliance logging its
+serial as its label — has since been fixed.
 
-1. **An unnamed appliance would log its serial.** `appliances.list_appliances`
-   falls back to `name = ha_id`, so an appliance with no friendly name would
-   have its serial written into the event log as the label — contradicting the
-   deliberate promise in `label_for` that the haId never reaches the log. The
-   dishwasher is named, so this does not currently trigger. A one-line fix, and
-   the one worth taking first.
-2. **Installed non-editably, the data directory resolves oddly.**
+1. **Installed non-editably, the data directory resolves oddly.**
    `default_data_dir()` anchors on `Path(__file__).parents[2]`, which is right
    for a repository checkout but points inside the interpreter's tree for a
    non-editable install. `HOMECONNECT_DATA_DIR` overrides it and must be set
    before import, since `DATA_DIR` is module-level.
-3. **A locked Keychain retries every minute.** The recorder exits 4 and launchd
+2. **A locked Keychain retries every minute.** The recorder exits 4 and launchd
    restarts it after its 60-second throttle, appending guidance to
    `recorder.err` each time. Bounded, but noisier than it needs to be.
-4. **Two cycles beginning in the same second** could attribute a programme to
+3. **Two cycles beginning in the same second** could attribute a programme to
    the wrong one. Not a real scenario for a dishwasher.
 
 ## Possible future work
 
-**Notifications.** The recorder already knows the moment a cycle finishes and
-the moment salt runs low. Wiring either to a notification is small and is the
-most likely thing to be actually wanted.
+**Notifications** are deliberately not wanted — the Home Connect app already
+sends them. What was wanted, and is now built, is the *record* of when they
+arrived: `history -x` shows every arrival and the time between them, since the
+API sends no all-clear and an arrival is the only thing that can be stated
+truthfully.
 
-**Statistics over the log.** Once a few weeks of cycles exist, `history` could
-report averages, most-used programmes, and time-of-day patterns. Deliberately
-not built yet: there was no data to design against, and guessing at the shape of
-a report before seeing real data is how reports get built that nobody reads.
+**Time-of-day patterns.** `history -x` now reports intervals, averages and the
+most-used programme over both cycles and alerts. What it does not do is look at
+*when* in the day things happen — deliberately, until there is enough data to
+design against. Guessing at the shape of a report before seeing real data is how
+reports get built that nobody reads.
+
+**Forecasting is still out.** Nothing projects when the salt will next run low.
+Three intervals from a dishwasher is not a forecast, and a tool whose value is
+not overclaiming should not start there.
 
 **More appliances.** The plumbing is appliance-agnostic — `api`, `auth`,
 `appliances` and the recorder need no changes. A new appliance type needs one

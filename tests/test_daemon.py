@@ -861,8 +861,9 @@ def test_a_salt_warning_survives_the_next_reconciliation_poll(tmp_path):
     )
 
     records, _ = store.read_records(events_path)
-    salt = next(c for c in report.consumables(records) if c.name == "SaltNearlyEmpty")
-    assert salt.state == "low", "a poll that cannot see salt must not clear it"
+    salt = next(a for a in report.alerts(records) if a.name == "SaltNearlyEmpty")
+    assert salt.occurrences == ("2026-08-26T19:00:00Z",), \
+        "a poll that cannot see salt must neither clear nor duplicate it"
     assert not [
         r for r in records
         if r.get("key") == "SaltNearlyEmpty" and r.get("to") is None
