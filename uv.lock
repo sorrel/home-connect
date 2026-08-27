@@ -282,7 +282,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.0.0" },
     { name = "keyring", specifier = ">=25.0.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "python-dotenv", specifier = ">=1.2.1" },
     { name = "requests", specifier = ">=2.28.0" },
 ]
 
