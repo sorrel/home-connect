@@ -141,7 +141,7 @@ def test_access_token_without_stored_token_raises():
 
 def test_load_credentials_missing_client_id_raises(monkeypatch):
     monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
-    monkeypatch.setattr(auth, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(auth, "load_dotenv_bounded", lambda *a, **k: True)
 
     with pytest.raises(auth.MissingCredentials):
         auth.load_credentials()
@@ -150,7 +150,7 @@ def test_load_credentials_missing_client_id_raises(monkeypatch):
 def test_load_credentials_reads_environment(monkeypatch):
     monkeypatch.setenv("HOMECONNECT_CLIENT_ID", "client-1")
     monkeypatch.setenv("HOMECONNECT_CLIENT_SECRET", "secret-1")
-    monkeypatch.setattr(auth, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(auth, "load_dotenv_bounded", lambda *a, **k: True)
 
     credentials = auth.load_credentials()
 
@@ -161,7 +161,7 @@ def test_load_credentials_reads_environment(monkeypatch):
 def test_missing_credentials_message_never_leaks_the_secret(monkeypatch):
     monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
     monkeypatch.setenv("HOMECONNECT_CLIENT_SECRET", "super-secret-value")
-    monkeypatch.setattr(auth, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(auth, "load_dotenv_bounded", lambda *a, **k: True)
 
     with pytest.raises(auth.MissingCredentials) as caught:
         auth.load_credentials()
@@ -339,3 +339,115 @@ def test_keyring_error_is_exposed_for_callers_to_catch():
     import keyring.errors
 
     assert auth.KeyringError is keyring.errors.KeyringError
+
+
+# --- Bounded .env loading --------------------------------------------------
+#
+# The `.env` is a 1Password local-env file: a FIFO that yields its contents
+# only once 1Password attaches as a writer. A plain blocking `load_dotenv()`
+# hangs forever when 1Password is locked, and `load_credentials()` is the very
+# first thing the recorder does — so it would hang at boot before writing a
+# single log line, with `KeepAlive` unable to help because the process never
+# exits. These tests pin the non-blocking behaviour.
+
+import os
+import threading
+import time as time_module
+
+
+def _attach_writer(path, text, delay=0.0):
+    """Attach as a writer after `delay`, the way 1Password does."""
+    def _writer():
+        if delay:
+            time_module.sleep(delay)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    thread = threading.Thread(target=_writer, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_read_env_text_reads_a_regular_file(tmp_path):
+    path = tmp_path / ".env"
+    path.write_text("HOMECONNECT_CLIENT_ID=abc\n", encoding="utf-8")
+    assert auth._read_env_text(str(path)) == "HOMECONNECT_CLIENT_ID=abc\n"
+
+
+def test_read_env_text_returns_none_when_absent(tmp_path):
+    assert auth._read_env_text(str(tmp_path / "nope.env")) is None
+
+
+def test_read_env_text_returns_none_for_an_empty_path():
+    # find_dotenv() returns "" when it finds nothing; that must not be stat'ed.
+    assert auth._read_env_text("") is None
+
+
+def test_read_env_text_reads_a_fifo_once_a_writer_attaches(tmp_path):
+    path = tmp_path / ".env"
+    os.mkfifo(path)
+    _attach_writer(path, "HOMECONNECT_CLIENT_ID=from-fifo\n", delay=0.2)
+
+    assert auth._read_env_text(str(path), timeout=5.0) == "HOMECONNECT_CLIENT_ID=from-fifo\n"
+
+
+def test_read_env_text_gives_up_when_no_writer_ever_attaches(tmp_path):
+    """The locked-1Password case: must return, not hang."""
+    path = tmp_path / ".env"
+    os.mkfifo(path)
+
+    started = time_module.monotonic()
+    assert auth._read_env_text(str(path), timeout=0.3) is None
+    assert time_module.monotonic() - started < 3.0
+
+
+def test_load_dotenv_bounded_populates_the_environment(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    path.write_text("HOMECONNECT_CLIENT_ID=from-file\n", encoding="utf-8")
+    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: str(path))
+    monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
+
+    assert auth.load_dotenv_bounded() is True
+    assert os.environ["HOMECONNECT_CLIENT_ID"] == "from-file"
+
+
+def test_load_dotenv_bounded_does_not_override_an_existing_value(tmp_path, monkeypatch):
+    """Matches load_dotenv()'s default: an explicit export still wins."""
+    path = tmp_path / ".env"
+    path.write_text("HOMECONNECT_CLIENT_ID=from-file\n", encoding="utf-8")
+    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: str(path))
+    monkeypatch.setenv("HOMECONNECT_CLIENT_ID", "from-environment")
+
+    assert auth.load_dotenv_bounded() is True
+    assert os.environ["HOMECONNECT_CLIENT_ID"] == "from-environment"
+
+
+def test_load_dotenv_bounded_reports_failure_on_timeout(tmp_path, monkeypatch):
+    path = tmp_path / ".env"
+    os.mkfifo(path)
+    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: str(path))
+
+    assert auth.load_dotenv_bounded(timeout=0.3) is False
+
+
+def test_load_credentials_says_so_when_the_env_read_times_out(tmp_path, monkeypatch):
+    """A locked 1Password must produce guidance, not a hang and not a bare
+    'CLIENT_ID is not set' that sends you looking in the wrong place."""
+    monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
+    monkeypatch.setattr(auth, "load_dotenv_bounded", lambda *a, **k: False)
+
+    with pytest.raises(auth.MissingCredentials) as caught:
+        auth.load_credentials()
+
+    assert "1Password" in str(caught.value)
+    assert "Timed out" in str(caught.value)
+
+
+def test_load_credentials_timeout_message_never_leaks_the_secret(monkeypatch):
+    monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
+    monkeypatch.setenv("HOMECONNECT_CLIENT_SECRET", "super-secret-value")
+    monkeypatch.setattr(auth, "load_dotenv_bounded", lambda *a, **k: False)
+
+    with pytest.raises(auth.MissingCredentials) as caught:
+        auth.load_credentials()
+
+    assert "super-secret-value" not in str(caught.value)

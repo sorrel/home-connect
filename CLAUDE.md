@@ -114,7 +114,15 @@ launchd/
 ```
 
 - **`auth.py`** — one-off device-flow consent. Client ID/secret come from a
-  1Password-mounted `.env` at the repository root (never committed). The
+  1Password-mounted `.env` at the repository root (never committed). That file
+  is a **FIFO**, not a regular file: it yields its contents only once 1Password
+  attaches as a writer, which needs the app unlocked. `load_dotenv()` opens it
+  *blocking*, so with 1Password locked it hangs indefinitely — and since
+  `load_credentials()` is the first thing `daemon.main()` does, that hang used
+  to happen at boot, before the recorder logged anything, with `KeepAlive`
+  powerless because the process never exited. `load_dotenv_bounded()` now reads
+  it under `ENV_READ_TIMEOUT` (O_NONBLOCK plus a poll for the writer) and
+  raises `MissingCredentials` naming 1Password, so launchd retries instead. The
   refresh token is stored in the Keychain and rotates on every use; the
   rotated value is always written back, since Home Connect invalidates the
   previous one.
