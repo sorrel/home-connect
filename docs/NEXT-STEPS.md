@@ -52,14 +52,21 @@ serial as its label — has since been fixed.
 
 ## Possible future work
 
-**Notifications.** The recorder already knows the moment a cycle finishes and
-the moment salt runs low. Wiring either to a notification is small and is the
-most likely thing to be actually wanted.
+**Notifications** are deliberately not wanted — the Home Connect app already
+sends them. What was wanted, and is now built, is the *record* of when they
+arrived: `history -x` shows every arrival and the time between them, since the
+API sends no all-clear and an arrival is the only thing that can be stated
+truthfully.
 
-**Statistics over the log.** Once a few weeks of cycles exist, `history` could
-report averages, most-used programmes, and time-of-day patterns. Deliberately
-not built yet: there was no data to design against, and guessing at the shape of
-a report before seeing real data is how reports get built that nobody reads.
+**Time-of-day patterns.** `history -x` now reports intervals, averages and the
+most-used programme over both cycles and alerts. What it does not do is look at
+*when* in the day things happen — deliberately, until there is enough data to
+design against. Guessing at the shape of a report before seeing real data is how
+reports get built that nobody reads.
+
+**Forecasting is still out.** Nothing projects when the salt will next run low.
+Three intervals from a dishwasher is not a forecast, and a tool whose value is
+not overclaiming should not start there.
 
 **More appliances.** The plumbing is appliance-agnostic — `api`, `auth`,
 `appliances` and the recorder need no changes. A new appliance type needs one

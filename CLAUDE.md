@@ -103,8 +103,9 @@ src/homeconnect/
   daemon.py       the recorder loop: seed, listen, reconcile, mark gaps;
                   the `homeconnect-recorder` console-script entry point
   report.py       turns the event log into answers (`homeconnect history`,
-                  and `-x` for the full alert record with intervals), honest
-                  about what a coverage gap leaves unseen
+                  and `-x` for the full record of cycles and alerts with the
+                  intervals between them), honest about what a coverage gap
+                  leaves unseen
 launchd/
   com.homeconnect.recorder.plist   tracked template; __REPO__ placeholder,
                                     no real path

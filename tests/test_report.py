@@ -244,3 +244,61 @@ def test_a_lone_gap_is_described_in_the_singular():
     """`1 gap(s) mean an arrival may have gone unseen` is not English."""
     text = plain(report.render([SALT_LOW, GAP], expanded=True, now=NOW))
     assert "1 coverage gap means" in text and "gap(s)" not in text
+
+
+# --- Cycles, given the same arithmetic ------------------------------------
+
+def run_at(started, ended=None, programme=None):
+    records = [{"ts": started, "ha": "dishwasher", "key": "OperationState",
+                "from": "Ready", "to": "Run"}]
+    if programme:
+        records.append({"ts": started, "ha": "dishwasher", "key": "Programme",
+                        "from": None, "to": programme})
+    if ended:
+        records.append({"ts": ended, "ha": "dishwasher", "key": "OperationState",
+                        "from": "Run", "to": "Finished"})
+    return records
+
+
+def test_cycle_intervals_are_the_days_between_consecutive_starts():
+    found = report.cycles(run_at("2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z")
+                          + run_at("2026-01-04T00:00:00Z", "2026-01-04T02:00:00Z"))
+    assert report.cycle_intervals_days(found) == [3.0]
+
+
+def test_a_run_never_seen_to_finish_contributes_no_duration():
+    """Its end is unknown, not zero. Averaging in a nought would understate
+    every duration around it."""
+    found = report.cycles(run_at("2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z")
+                          + run_at("2026-01-04T00:00:00Z"))
+    assert report.cycle_durations_seconds(found) == [7200.0]
+
+
+def test_the_expanded_view_boxes_the_cycles_with_their_arithmetic():
+    records = (run_at("2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z", "Eco50")
+               + run_at("2026-01-04T00:00:00Z", "2026-01-04T03:00:00Z", "Eco50")
+               + run_at("2026-01-09T00:00:00Z", "2026-01-09T02:00:00Z", "Auto65"))
+
+    text = plain(report.render(records, expanded=True, now=NOW))
+
+    assert "3 runs" in text
+    assert "+3 days" in text and "+5 days" in text
+    assert "4 days" in text            # the mean of 3 and 5
+    assert "Eco50 (2 of 3)" in text    # the programme used most
+    assert "2h 20m" in text            # the mean of 2h, 3h and 2h
+
+
+def test_the_cycle_box_and_the_alert_boxes_share_one_width():
+    """Every panel is one column down the page, not a ragged stack."""
+    records = (run_at("2026-01-01T00:00:00Z", "2026-01-01T02:00:00Z", "Eco50")
+               + [salt_at("2026-01-02T00:00:00Z")])
+
+    box = [line for line in plain(report.render(records, expanded=True, now=NOW))
+           .splitlines() if line.startswith(("┌", "│", "├", "└"))]
+
+    assert len({report_width(line) for line in box}) == 1, box
+
+
+def test_a_log_with_no_cycles_says_so_inside_the_box():
+    text = plain(report.render([SALT_LOW], expanded=True, now=NOW))
+    assert "no cycles recorded" in text

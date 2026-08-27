@@ -147,6 +147,41 @@ def intervals_days(occurrences: tuple[str, ...] | list[str]) -> list[float]:
     return found
 
 
+def cycle_intervals_days(found: list[Cycle]) -> list[float]:
+    """Days between the start of each run and the start of the next."""
+    starts = [c.started for c in sorted(found, key=lambda c: c.started)]
+    return intervals_days(starts)
+
+
+def cycle_durations_seconds(found: list[Cycle]) -> list[float]:
+    """How long each run took, skipping any never seen to finish.
+
+    An unfinished run's end is unknown, not zero: averaging in a nought would
+    quietly understate every duration reported beside it.
+    """
+    durations = []
+    for cycle in found:
+        if cycle.ended is None:
+            continue
+        seconds = store.elapsed_seconds(cycle.started, cycle.ended)
+        if seconds is not None:
+            durations.append(seconds)
+    return durations
+
+
+def commonest_programme(found: list[Cycle]) -> tuple[str, int] | None:
+    """The programme run most often, and how many times, or `None`.
+
+    Runs whose programme was never named are not counted for or against: an
+    unnamed run is missing information, not a vote for anything.
+    """
+    named = [c.programme for c in found if c.programme]
+    if not named:
+        return None
+    winner = max(sorted(set(named)), key=named.count)
+    return winner, named.count(winner)
+
+
 def days_since(stamp: str, now: str) -> float | None:
     seconds = store.elapsed_seconds(stamp, now)
     return None if seconds is None else seconds / _DAY
@@ -176,6 +211,9 @@ _MIN_BOX = 58
 #: The badge for an alert with no recorded arrival — quiet, not a warning.
 _NEVER = "never fired"
 
+#: The same, for a log that has yet to see the appliance run.
+_NEVER_RUN = "none recorded"
+
 
 def _measure(text: str) -> int:
     """Display width of `text` once its colour is stripped.
@@ -202,6 +240,13 @@ def _plural(count: int, noun: str, verb: tuple[str, str] | None = None) -> str:
         return phrase
     singular, plural = verb
     return f"{phrase} {singular if count == 1 else plural}"
+
+
+def _duration(seconds: float) -> str:
+    """`2h 20m`, the way a person describes a wash."""
+    minutes = int(round(seconds / 60))
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m" if hours else f"{minutes}m"
 
 
 def _ago(stamp: str, now: str) -> str:
@@ -280,6 +325,59 @@ def _alert_panel(alert: Alert, now: str
             rows, footer)
 
 
+def _cycle_panel(found: list[Cycle], expanded: bool
+                 ) -> tuple[str, str, list[str], list[str]]:
+    """Every run, with the interval since the previous one and the totals."""
+    if not found:
+        return ("Cycles", _NEVER_RUN,
+                [click.style("no cycles recorded", **_QUIET)], [])
+
+    ordered = sorted(found, key=lambda c: c.started)
+    programmes = [c.programme or "unknown programme" for c in ordered]
+    width = max(_measure(p) for p in programmes)
+
+    rows = []
+    previous = None
+    for cycle, programme in zip(ordered, programmes):
+        took = (_duration(store.elapsed_seconds(cycle.started, cycle.ended) or 0)
+                if cycle.ended else "still running")
+        row = (click.style(cycle.started, **_STAMP) + "  "
+               + click.style(programme, fg="bright_yellow")
+               + " " * (width - _measure(programme)) + "  "
+               + click.style(f"{took:>13}", **_QUIET))
+        if previous is not None:
+            span = days_since(previous, cycle.started)
+            if span is not None:
+                row += click.style(f"   +{_number(span)} days", **_SPAN)
+        previous = cycle.started
+        rows.append(row)
+
+    footer = []
+    spans = cycle_intervals_days(ordered)
+    if spans:
+        mean = sum(spans) / len(spans)
+        footer.append(
+            f"every {click.style(_number(mean) + ' days', **_SPAN)} on average"
+            + click.style("  ·  ", **_QUIET)
+            + f"shortest {_number(min(spans))}, longest {_number(max(spans))}"
+        )
+    durations = cycle_durations_seconds(ordered)
+    summary = []
+    if durations:
+        summary.append("typical run "
+                       + click.style(_duration(sum(durations) / len(durations)),
+                                     **_SPAN))
+    commonest = commonest_programme(ordered)
+    if commonest:
+        name, count = commonest
+        summary.append(f"most used {click.style(name, fg='bright_yellow')} "
+                       f"({count} of {len(ordered)})")
+    if summary:
+        footer.append(click.style("  ·  ", **_QUIET).join(summary))
+
+    return ("Cycles", _plural(len(ordered), "run"), rows, footer)
+
+
 def _cycle_line(cycle: Cycle) -> str:
     ended = cycle.ended or "still running"
     programme = cycle.programme or "unknown programme"
@@ -308,50 +406,45 @@ def render(records: list[dict], skipped: int = 0, *,
     gaps, latest_gap = coverage(records)
     lines: list[str] = []
 
-    # --- cycles ---
     found = cycles(records)
-    lines.append(_heading(f"Cycles: {len(found)}"))
-    shown = found if expanded else [
-        c for c in found if (days_since(c.started, now) or 0) <= RECENT_DAYS]
-    if not expanded and len(shown) < len(found):
-        lines.append(click.style(
-            f"  (the {len(shown)} in the last {RECENT_DAYS} days; "
-            f"-x shows all {len(found)})", **_QUIET))
-    if not shown:
-        lines.append(click.style(
-            f"  none in the last {RECENT_DAYS} days", **_QUIET))
-    previous = None
-    for cycle in shown:
-        line = _cycle_line(cycle)
-        if expanded and previous is not None:
-            span = days_since(previous, cycle.started)
-            if span is not None:
-                line += click.style(f"   +{_number(span)} days", **_SPAN)
-        previous = cycle.started
-        lines.append(line)
-
-    # --- alerts ---
     every = alerts(records)
-    lines.append("")
 
     if expanded:
-        lines.append(_heading("Alert history — the complete record"))
+        lines.append(_heading("The complete record"))
         lines.append(click.style(
-            "No all-clear is ever sent, so these are arrivals, not current state.",
-            **_QUIET))
-        panels = [_alert_panel(alert, now) for alert in every]
+            "No all-clear is ever sent, so alerts are arrivals, not current "
+            "state.", **_QUIET))
+
+        # One width across every panel, so they read as a single column
+        # rather than a ragged stack.
+        panels = [_cycle_panel(found, expanded)] + [
+            _alert_panel(alert, now) for alert in every]
         width = _box_width(panels)
         for panel in panels:
             lines.append("")
             lines.extend(_box(*panel, width=width,
-                              quiet_badge=panel[1] == _NEVER))
+                              quiet_badge=panel[1] in (_NEVER, _NEVER_RUN)))
+
         if gaps:
             lines.append("")
             lines.append(click.style(
                 "Counts are at least this many: "
                 f"{_plural(gaps, 'coverage gap', ('means', 'mean'))} "
-                "an arrival may have gone unseen.", **_CAVEAT))
+                "a run or an arrival may have gone unseen.", **_CAVEAT))
     else:
+        lines.append(_heading(f"Cycles: {len(found)}"))
+        shown = [c for c in found
+                 if (days_since(c.started, now) or 0) <= RECENT_DAYS]
+        if len(shown) < len(found):
+            lines.append(click.style(
+                f"  (the {len(shown)} in the last {RECENT_DAYS} days; "
+                f"-x shows all {len(found)})", **_QUIET))
+        if not shown:
+            lines.append(click.style(
+                f"  none in the last {RECENT_DAYS} days", **_QUIET))
+        lines.extend(_cycle_line(cycle) for cycle in shown)
+
+        lines.append("")
         lines.append(_heading(f"Alerts — the last {RECENT_DAYS} days"))
         for alert in every:
             label = f"  {alert.name:22}"
