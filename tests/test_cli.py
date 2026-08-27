@@ -433,3 +433,27 @@ def test_locked_keychain_gives_guidance_not_a_traceback(monkeypatch):
     assert result.exit_code != 0
     assert "Keychain" in result.output
     assert "Traceback" not in result.output
+
+
+def test_dash_h_is_accepted_as_well_as_dash_dash_help():
+    """`-h` is what fingers type. Click offers no default alias for it."""
+    from click.testing import CliRunner
+
+    from homeconnect.cli import cli
+
+    result = CliRunner().invoke(cli, ["-h"])
+
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
+
+
+def test_dash_h_works_on_a_subcommand_too():
+    """The group's context settings must reach the commands beneath it."""
+    from click.testing import CliRunner
+
+    from homeconnect.cli import cli
+
+    result = CliRunner().invoke(cli, ["history", "-h"])
+
+    assert result.exit_code == 0
+    assert "--expanded" in result.output
