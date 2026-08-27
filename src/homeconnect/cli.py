@@ -96,7 +96,14 @@ def _matches(appliance, needle: str) -> bool:
     return needle in appliance.name.lower() or needle in appliance.type.lower()
 
 
-@click.group(cls=help_module.ColouredGroup, invoke_without_command=True)
+#: `-h` alongside `--help`, on the group and every subcommand beneath it.
+#: Click only honours this where a context is built, so it is set on the
+#: group rather than repeated per command.
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+
+@click.group(cls=help_module.ColouredGroup, invoke_without_command=True,
+             context_settings=CONTEXT_SETTINGS)
 @click.option("--verbose", "-v", is_flag=True, help="Show every field with raw API key names. Ignored with --json.")
 @click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @click.option("--appliance", "-a", default=None, help="Only show appliances matching this name or type.")
