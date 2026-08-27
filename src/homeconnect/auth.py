@@ -34,8 +34,8 @@ from keyring.errors import KeyringError  # noqa: F401  (re-exported)
 __all__ = [
     "AuthorisationPending", "Credentials", "DeviceCode", "KeyringError",
     "MissingCredentials", "NotAuthenticated", "SCOPE", "access_token",
-    "begin_device_authorisation", "load_credentials", "load_dotenv_bounded",
-    "redeem_device_code",
+    "begin_device_authorisation", "dotenv_path", "load_credentials",
+    "load_dotenv_bounded", "redeem_device_code",
 ]
 
 DEVICE_AUTHORISATION_URL = (
@@ -247,6 +247,30 @@ def _read_env_text(path: str, timeout: float = ENV_READ_TIMEOUT) -> str | None:
     return b"".join(chunks).decode("utf-8", "replace")
 
 
+#: …/<repository>/src/homeconnect/auth.py -> …/<repository>/.env
+_ANCHORED_ENV = Path(__file__).resolve().parents[2] / ".env"
+
+
+def dotenv_path() -> str:
+    """Locate the `.env`, anchored to the repository rather than to the cwd.
+
+    `find_dotenv(usecwd=True)` searches upwards from `os.getcwd()`, so running
+    the installed `homeconnect` command from anywhere but the checkout finds
+    nothing and reports a 1Password timeout for a perfectly mounted `.env`.
+    The repository root is derived from this module's own location instead,
+    exactly as `store.default_data_dir()` does, with a cwd search kept as a
+    fallback for the package installed outside a checkout.
+
+    `os.stat` rather than `isfile()`: the mounted `.env` is a FIFO, for which
+    `isfile()` is False.
+    """
+    try:
+        os.stat(_ANCHORED_ENV)
+    except OSError:
+        return find_dotenv(usecwd=True)
+    return str(_ANCHORED_ENV)
+
+
 def load_dotenv_bounded(timeout: float = ENV_READ_TIMEOUT) -> bool:
     """Load the `.env` into `os.environ`, never blocking beyond `timeout`.
 
@@ -254,7 +278,7 @@ def load_dotenv_bounded(timeout: float = ENV_READ_TIMEOUT) -> bool:
     so an explicitly exported value still wins. Returns False if the file could
     not be read in time.
     """
-    path = find_dotenv(usecwd=True)
+    path = dotenv_path()
     text = _read_env_text(path, timeout=timeout)
     if text is None:
         return False

@@ -400,10 +400,41 @@ def test_read_env_text_gives_up_when_no_writer_ever_attaches(tmp_path):
     assert time_module.monotonic() - started < 3.0
 
 
+def test_dotenv_path_is_anchored_to_the_repository_not_the_cwd(tmp_path, monkeypatch):
+    """Running the installed command from elsewhere must still find the .env."""
+    anchored = tmp_path / ".env"
+    anchored.write_text("HOMECONNECT_CLIENT_ID=anchored\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(auth, "_ANCHORED_ENV", anchored)
+    monkeypatch.chdir(elsewhere)
+
+    assert auth.dotenv_path() == str(anchored)
+
+
+def test_dotenv_path_accepts_a_fifo(tmp_path, monkeypatch):
+    """The mounted .env is a FIFO, for which isfile() is False."""
+    anchored = tmp_path / ".env"
+    os.mkfifo(anchored)
+    monkeypatch.setattr(auth, "_ANCHORED_ENV", anchored)
+
+    assert auth.dotenv_path() == str(anchored)
+
+
+def test_dotenv_path_falls_back_to_a_cwd_search_when_the_repository_has_none(
+    tmp_path, monkeypatch
+):
+    """Covers the package installed outside a checkout."""
+    monkeypatch.setattr(auth, "_ANCHORED_ENV", tmp_path / "absent" / ".env")
+    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: "/from/cwd/.env")
+
+    assert auth.dotenv_path() == "/from/cwd/.env"
+
+
 def test_load_dotenv_bounded_populates_the_environment(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     path.write_text("HOMECONNECT_CLIENT_ID=from-file\n", encoding="utf-8")
-    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: str(path))
+    monkeypatch.setattr(auth, "dotenv_path", lambda: str(path))
     monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
 
     assert auth.load_dotenv_bounded() is True
@@ -414,7 +445,7 @@ def test_load_dotenv_bounded_does_not_override_an_existing_value(tmp_path, monke
     """Matches load_dotenv()'s default: an explicit export still wins."""
     path = tmp_path / ".env"
     path.write_text("HOMECONNECT_CLIENT_ID=from-file\n", encoding="utf-8")
-    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: str(path))
+    monkeypatch.setattr(auth, "dotenv_path", lambda: str(path))
     monkeypatch.setenv("HOMECONNECT_CLIENT_ID", "from-environment")
 
     assert auth.load_dotenv_bounded() is True
@@ -424,7 +455,7 @@ def test_load_dotenv_bounded_does_not_override_an_existing_value(tmp_path, monke
 def test_load_dotenv_bounded_reports_failure_on_timeout(tmp_path, monkeypatch):
     path = tmp_path / ".env"
     os.mkfifo(path)
-    monkeypatch.setattr(auth, "find_dotenv", lambda *a, **k: str(path))
+    monkeypatch.setattr(auth, "dotenv_path", lambda: str(path))
 
     assert auth.load_dotenv_bounded(timeout=0.3) is False
 
