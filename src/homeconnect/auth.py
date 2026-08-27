@@ -15,12 +15,16 @@ exception message.
 
 from __future__ import annotations
 
+import io
 import os
+import stat
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values, find_dotenv
 from keyring.errors import KeyringError  # noqa: F401  (re-exported)
 
 #: Re-exported deliberately. A locked, denied or reprompting Keychain raises
@@ -30,7 +34,8 @@ from keyring.errors import KeyringError  # noqa: F401  (re-exported)
 __all__ = [
     "AuthorisationPending", "Credentials", "DeviceCode", "KeyringError",
     "MissingCredentials", "NotAuthenticated", "SCOPE", "access_token",
-    "begin_device_authorisation", "load_credentials", "redeem_device_code",
+    "begin_device_authorisation", "load_credentials", "load_dotenv_bounded",
+    "redeem_device_code",
 ]
 
 DEVICE_AUTHORISATION_URL = (
@@ -179,10 +184,97 @@ class DeviceCode:
     expires_in: int
 
 
+# How long to wait for 1Password to hand over the `.env` contents. Long enough
+# for a present user to approve the prompt; short enough that the recorder gives
+# up and lets launchd retry rather than sitting there.
+ENV_READ_TIMEOUT = 15.0
+
+
+def _read_env_text(path: str, timeout: float = ENV_READ_TIMEOUT) -> str | None:
+    """Return the text of the `.env` at `path`, or None if it could not be read.
+
+    The file is normally a 1Password local-env file, which is a **FIFO**: it
+    yields its contents only once 1Password attaches as a writer, and that
+    needs the app unlocked and the read authorised. Plain `load_dotenv()` opens
+    it blocking, so an unattended start with 1Password locked hangs forever,
+    with no exception and no timeout to catch (this is the first thing the
+    recorder does, so it hangs before it logs a single line).
+
+    So: O_NONBLOCK, which returns from `open()` even with no writer attached —
+    the open is itself what prompts 1Password to attach — then poll until the
+    writer has written and closed. An empty read means "no writer *yet*", not
+    end-of-data, so it counts as EOF only once bytes have actually arrived.
+    """
+    if not path:
+        return None
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return None
+
+    if not stat.S_ISFIFO(mode):
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+
+    chunks: list[bytes] = []
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                chunk = None          # writer attached, nothing ready yet
+            except OSError:
+                return None
+            if chunk:
+                chunks.append(chunk)
+                continue
+            if chunk == b"" and chunks:
+                break                 # writer closed after writing: real EOF
+            time.sleep(0.05)          # no writer yet — give 1Password a moment
+        else:
+            return None               # deadline passed; caller decides
+    finally:
+        os.close(fd)
+
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+def load_dotenv_bounded(timeout: float = ENV_READ_TIMEOUT) -> bool:
+    """Load the `.env` into `os.environ`, never blocking beyond `timeout`.
+
+    Mirrors `load_dotenv()`'s default of not overriding variables already set,
+    so an explicitly exported value still wins. Returns False if the file could
+    not be read in time.
+    """
+    path = find_dotenv(usecwd=True)
+    text = _read_env_text(path, timeout=timeout)
+    if text is None:
+        return False
+    for key, value in dotenv_values(stream=io.StringIO(text)).items():
+        if value is not None and key not in os.environ:
+            os.environ[key] = value
+    return True
+
+
 def load_credentials() -> Credentials:
     """Read the application credentials from the 1Password-mounted `.env`."""
-    load_dotenv()
+    loaded = load_dotenv_bounded()
     client_id = os.environ.get("HOMECONNECT_CLIENT_ID")
+    if not client_id and not loaded:
+        raise MissingCredentials(
+            "Timed out reading .env after "
+            f"{ENV_READ_TIMEOUT:.0f}s — is 1Password unlocked? It streams the "
+            "'Home Connect' environment through that file on demand, so a "
+            "locked app means no credentials."
+        )
     if not client_id:
         raise MissingCredentials(
             "HOMECONNECT_CLIENT_ID is not set. Mount the 1Password 'Home Connect' "
