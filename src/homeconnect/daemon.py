@@ -46,7 +46,7 @@ QUOTA_BACKOFF_SECONDS = 1800
 #: the point events are applied, so one concept has exactly one name in the
 #: log. Without this the poll writes `Programme` and the stream writes
 #: `ActiveProgram`, and `report.cycles` — which matches `Programme` — renders
-#: every live-observed cycle as "unknown programme".
+#: every live-observed cycle with no programme name at all.
 _STREAM_KEY_ALIASES = {
     "ActiveProgram": "Programme",
     "SelectedProgram": "SelectedProgramme",
