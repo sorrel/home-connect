@@ -333,7 +333,7 @@ def _cycle_panel(found: list[Cycle], expanded: bool
                 [click.style("no cycles recorded", **_QUIET)], [])
 
     ordered = sorted(found, key=lambda c: c.started)
-    programmes = [c.programme or "unknown programme" for c in ordered]
+    programmes = [c.programme or "" for c in ordered]
     width = max(_measure(p) for p in programmes)
 
     rows = []
@@ -342,7 +342,7 @@ def _cycle_panel(found: list[Cycle], expanded: bool
         took = (_duration(store.elapsed_seconds(cycle.started, cycle.ended) or 0)
                 if cycle.ended else "still running")
         row = (click.style(cycle.started, **_STAMP) + "  "
-               + click.style(programme, fg="bright_yellow")
+               + (click.style(programme, fg="bright_yellow") if programme else "")
                + " " * (width - _measure(programme)) + "  "
                + click.style(f"{took:>13}", **_QUIET))
         if previous is not None:
@@ -380,9 +380,9 @@ def _cycle_panel(found: list[Cycle], expanded: bool
 
 def _cycle_line(cycle: Cycle) -> str:
     ended = cycle.ended or "still running"
-    programme = cycle.programme or "unknown programme"
+    programme = cycle.programme
     return ("  " + click.style(cycle.started, **_STAMP) + "  "
-            + click.style(programme, fg="bright_yellow") + "  "
+            + (click.style(programme, fg="bright_yellow") + "  " if programme else "")
             + click.style(f"-> {ended}", **_QUIET))
 
 
