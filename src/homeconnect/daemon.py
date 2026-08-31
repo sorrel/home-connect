@@ -441,6 +441,15 @@ def run(
                         ),
                         events_path,
                     )
+                    # The marker records the length; the log says it out loud,
+                    # so that the file someone actually opens when something
+                    # looks wrong closes the story the failure line opened.
+                    span = store.elapsed_seconds(coverage_lost_at, resumed_at)
+                    length = "an unknown period" if span is None else f"{span:.0f}s"
+                    log(
+                        f"coverage resumed after {length} "
+                        f"({coverage_lost_reason or 'recovered'})"
+                    )
                 coverage_lost_at = None
                 coverage_lost_reason = None
 
@@ -533,12 +542,22 @@ def run(
             if coverage_lost_at is None:
                 coverage_lost_at = now()
                 coverage_lost_reason = reason
-        except requests.RequestException:
+        except requests.RequestException as exc:
             consecutive_auth_failures = 0
             reason = "network_error"
             if coverage_lost_at is None:
                 coverage_lost_at = now()
                 coverage_lost_reason = reason
+                # Logged only as coverage is lost, never once per retry: the
+                # backoff tops out at five minutes, so a long outage is
+                # hundreds of cycles, and these files are never rotated. The
+                # exception is the only account of *why* — `events.jsonl`
+                # records the blind spot but reduces every cause to
+                # "network_error" — so if it is not written here it is lost.
+                log(
+                    f"network error, reconnecting: {type(exc).__name__}: {exc}",
+                    error=True,
+                )
 
         if consecutive_auth_failures >= 2:
             raise AuthenticationExhausted(

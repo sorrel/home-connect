@@ -1132,3 +1132,97 @@ def test_log_sends_errors_to_stderr_and_notices_to_stdout(capsys):
     assert "a notice" not in captured.err
     assert "a problem" in captured.err
     assert "a problem" not in captured.out
+
+
+# --- What a network failure leaves behind in the log ----------------------
+
+
+def test_run_logs_the_detail_of_a_network_error(tmp_path, capsys):
+    """A `network_error` marker names no cause; the log must name one.
+
+    `events.jsonl` records that coverage was lost and nothing about why. The
+    reason lives only in the exception, so if it is not logged here it is
+    gone — which is how a nineteen-hour outage came to have no diagnosis.
+    """
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    attempts = iter([requests.ConnectionError("name resolution failed"), None])
+
+    def build_client():
+        problem = next(attempts)
+        if problem is not None:
+            raise problem
+        return _dishwasher_client()
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=200),
+        iterations=2,
+    )
+
+    err = capsys.readouterr().err
+    assert "ConnectionError" in err, "the exception type must survive"
+    assert "name resolution failed" in err, "the exception message must survive"
+
+
+def test_run_logs_a_network_error_once_not_once_per_retry(tmp_path, capsys):
+    """These logs are never rotated, so a long outage must not flood them.
+
+    The backoff tops out at five minutes, so nineteen hours of failure is
+    upwards of two hundred cycles. One line per cycle would bury the very
+    thing the log is being read for.
+    """
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    def build_client():
+        raise requests.ConnectionError("still down")
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=200),
+        iterations=5,
+    )
+
+    err = capsys.readouterr().err
+    assert err.count("still down") == 1, "one line for the whole outage"
+
+
+def test_run_logs_how_long_coverage_was_lost_when_it_resumes(tmp_path, capsys):
+    """The recovery is as worth knowing as the failure, and carries the length."""
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    attempts = iter([requests.ConnectionError("down"), None])
+
+    def build_client():
+        problem = next(attempts)
+        if problem is not None:
+            raise problem
+        return _dishwasher_client()
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=200),
+        iterations=2,
+    )
+
+    out = capsys.readouterr().out
+    assert "resumed" in out
+    # Two stamps are drawn between coverage being lost and the poll that
+    # ends it, so the gap spans two 200-second steps.
+    assert "400s" in out, "the gap's length in seconds"
