@@ -1226,3 +1226,105 @@ def test_run_logs_how_long_coverage_was_lost_when_it_resumes(tmp_path, capsys):
     # Two stamps are drawn between coverage being lost and the poll that
     # ends it, so the gap spans two 200-second steps.
     assert "400s" in out, "the gap's length in seconds"
+
+
+# --- Escalation: an outage the backoff loop alone never clears --------------
+
+
+def test_run_raises_after_a_coverage_gap_exceeds_the_escalation_threshold(tmp_path):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+
+    def build_client():
+        raise requests.ConnectionError("still down")
+
+    with pytest.raises(daemon.CoverageExhausted):
+        daemon.run(
+            build_client=build_client,
+            session_factory=lambda: None,
+            events_path=events_path,
+            state_path=state_path,
+            sleep=lambda _: None,
+            delays=iter([0.0] * 10),
+            now=_stamps(step_seconds=1000),
+            iterations=5,
+        )
+
+
+def test_run_does_not_escalate_a_gap_under_the_threshold(tmp_path):
+    """Two short-lived outages must not sum towards the threshold."""
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    attempts = iter([
+        requests.ConnectionError("down"), None,
+        requests.ConnectionError("down"), None,
+    ])
+
+    def build_client():
+        problem = next(attempts)
+        if problem is not None:
+            raise problem
+        return _dishwasher_client()
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=1000),
+        iterations=4,
+    )
+    # Reaching here at all is the assertion: each outage recovers before the
+    # next one starts, so neither alone nor combined should ever escalate.
+
+
+def test_run_notifies_desktop_when_escalating(tmp_path, monkeypatch):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    notified: list[str] = []
+    monkeypatch.setattr(daemon, "notify_desktop", notified.append)
+
+    def build_client():
+        raise requests.ConnectionError("still down")
+
+    with pytest.raises(daemon.CoverageExhausted):
+        daemon.run(
+            build_client=build_client,
+            session_factory=lambda: None,
+            events_path=events_path,
+            state_path=state_path,
+            sleep=lambda _: None,
+            delays=iter([0.0] * 10),
+            now=_stamps(step_seconds=1000),
+            iterations=5,
+        )
+
+    assert len(notified) == 1, "one notification for the whole outage, not one per retry"
+
+
+def test_main_returns_nonzero_on_coverage_exhausted(monkeypatch):
+    monkeypatch.setattr(daemon.auth, "load_credentials", lambda: object())
+
+    @contextlib.contextmanager
+    def fake_lock():
+        yield
+
+    monkeypatch.setattr(daemon.store, "single_instance_lock", fake_lock)
+
+    def fake_run(**kwargs):
+        raise daemon.CoverageExhausted("coverage lost for 1900s")
+
+    monkeypatch.setattr(daemon, "run", fake_run)
+
+    assert daemon.main() == 5
+
+
+def test_notify_desktop_never_raises_when_osascript_is_unavailable(monkeypatch):
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("no osascript on this machine")
+
+    monkeypatch.setattr(daemon.subprocess, "run", boom)
+
+    daemon.notify_desktop("a test message")  # must not raise
