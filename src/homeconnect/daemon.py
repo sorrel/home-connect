@@ -13,6 +13,8 @@ drive all of it without a network, a Keychain, or a data directory.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -41,6 +43,15 @@ GAP_THRESHOLD_SECONDS = 120
 #: spend the rest of the day re-asking an exhausted quota for permission, which
 #: is how a quota stays exhausted. Half an hour, and the stream is unaffected.
 QUOTA_BACKOFF_SECONDS = 1800
+
+#: How long a single, unresolved outage may run before the in-process backoff
+#: loop gives up and asks launchd for a fresh start instead. Above
+#: GAP_THRESHOLD_SECONDS (noise) and in the same order as QUOTA_BACKOFF_SECONDS
+#: (a wait that is known to resolve itself) — this is for outages the backoff
+#: sequence alone has already failed to clear, such as the 11-hour stall a
+#: wedged socket or a stale DNS answer can cause even while the machine is
+#: awake and the backoff keeps retrying every five minutes.
+COVERAGE_ESCALATION_SECONDS = 1800
 
 #: Stream keys that name a concept the poll already has a name for. Folded at
 #: the point events are applied, so one concept has exactly one name in the
@@ -249,6 +260,40 @@ class AuthenticationExhausted(Exception):
     """
 
 
+class CoverageExhausted(Exception):
+    """A single interruption has run longer than COVERAGE_ESCALATION_SECONDS.
+
+    The in-process backoff loop tops out at five minutes and retries forever,
+    which is right for a genuine blip but does nothing for a connection wedged
+    in some other way — a poisoned resolver cache, a socket that never times
+    out cleanly. Exiting lets launchd relaunch the whole process: a fresh
+    interpreter, fresh DNS resolution, fresh everything, which is strictly
+    more than another retry inside the same process can offer.
+    """
+
+
+def notify_desktop(message: str) -> None:
+    """Best-effort macOS notification.
+
+    Never raises: a notification that cannot be delivered — no `osascript`,
+    a headless session, Notification Centre denied — must not be mistaken
+    for a recorder that has failed.
+    """
+    try:
+        subprocess.run(
+            [
+                "osascript", "-e",
+                "display notification "
+                f"{json.dumps(message)} with title \"Home Connect recorder\"",
+            ],
+            timeout=5,
+            check=False,
+            capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 class TokenHolder:
     """A refreshable, invalidatable access token cache.
 
@@ -419,6 +464,7 @@ def run(
     while iterations is None or completed < iterations:
         healthy_stream = False
         hit_quota = False
+        coverage_lost_at_start = coverage_lost_at
         try:
             client = build_client()
             found = appliances_module.list_appliances(client)
@@ -564,6 +610,25 @@ def run(
                 "two consecutive authentication failures; refreshing did not help"
             )
 
+        # Only checked when this iteration's coverage_lost_at is the exact
+        # same value it was before this iteration ran: a poll that recovered
+        # and then immediately lost coverage again (a healthy reconnection
+        # cycle, not a stuck outage) leaves a *different* value here, and
+        # must not be mistaken for one continuous, unresolved interruption.
+        if (
+            coverage_lost_at_start is not None
+            and coverage_lost_at == coverage_lost_at_start
+        ):
+            span = store.elapsed_seconds(coverage_lost_at, now())
+            if span is not None and span >= COVERAGE_ESCALATION_SECONDS:
+                message = (
+                    f"coverage lost for {span:.0f}s and counting "
+                    f"({coverage_lost_reason or 'unknown'}) — restarting"
+                )
+                notify_desktop(f"Home Connect recorder: {message}")
+                log(message, error=True)
+                raise CoverageExhausted(message)
+
         store.save_state(state, state_path)
 
         completed += 1
@@ -600,6 +665,9 @@ def main() -> int:
     except AuthenticationExhausted as exc:
         log(f"{exc}", error=True)
         return 4
+    except CoverageExhausted as exc:
+        log(f"{exc}", error=True)
+        return 5
     except KeyboardInterrupt:
         log("recorder stopped by interrupt")
         return 0
