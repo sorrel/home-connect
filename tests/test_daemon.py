@@ -220,6 +220,12 @@ def test_tail_reduces_non_bsh_vendor_namespaces():
     assert daemon._tail("Dishcare.Dishwasher.Program.Eco50") == "Eco50"
 
 
+def test_tail_reduces_washer_vendor_namespace():
+    """The washer namespace is `LaundryCare.`, not `Laundry.` — a prefix that
+    doesn't match leaves the value untouched instead of reducing it."""
+    assert daemon._tail("LaundryCare.Washer.Program.Cotton") == "Cotton"
+
+
 def test_tail_leaves_non_vendor_dotted_values_untouched():
     assert daemon._tail("1.5") == "1.5"
 

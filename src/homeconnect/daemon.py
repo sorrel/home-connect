@@ -67,7 +67,7 @@ _STREAM_KEY_ALIASES = {
 #: Deliberately a fixed list, not "any dotted string" — a value like "1.5"
 #: must survive untouched, not be mangled into "5".
 _VENDOR_PREFIXES = (
-    "BSH.", "Dishcare.", "Cooking.", "Laundry.", "Refrigeration.",
+    "BSH.", "Dishcare.", "Cooking.", "LaundryCare.", "Refrigeration.",
     "ConsumerProducts.",
 )
 

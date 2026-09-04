@@ -6,6 +6,11 @@ DISHWASHER = Appliance(
     brand="Bosch", vib="SMV6ZCX01G", enumber="SMV6ZCX01G/40", connected=True,
 )
 
+WASHER = Appliance(
+    ha_id="BOSCH-TEST-0002", name="Washing machine", type="Washer",
+    brand="Bosch", vib="WGB256090", enumber="WGB256090/44", connected=True,
+)
+
 
 def running_state(**status_extra):
     status = {
@@ -66,6 +71,40 @@ def test_door_open_is_reported_when_idle():
     )
 
     assert "door open" in render(state).lower()
+
+
+def test_running_washer_reports_programme_and_time():
+    state = ApplianceState(
+        appliance=WASHER,
+        status={
+            "BSH.Common.Status.OperationState":
+                "BSH.Common.EnumType.OperationState.Run",
+            "BSH.Common.Status.DoorState":
+                "BSH.Common.EnumType.DoorState.Closed",
+        },
+        programme=Programme(
+            key="LaundryCare.Washer.Program.Cotton.Eco4060",
+            options={"BSH.Common.Option.RemainingProgramTime": 5400},
+        ),
+    )
+
+    line = render(state)
+
+    assert "Cotton Eco 40-60" in line
+    assert "90 min" in line
+
+
+def test_finished_washer_reports_ready_to_unload():
+    state = ApplianceState(
+        appliance=WASHER,
+        status={
+            "BSH.Common.Status.OperationState":
+                "BSH.Common.EnumType.OperationState.Finished"
+        },
+        programme=None,
+    )
+
+    assert "ready to unload" in render(state).lower()
 
 
 def test_offline_appliance_says_so():
