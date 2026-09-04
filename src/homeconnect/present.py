@@ -24,6 +24,17 @@ PROGRAMME_NAMES = {
     "Dishcare.Dishwasher.Program.Glas40": "Glass 40",
     "Dishcare.Dishwasher.Program.PreRinse": "Pre-rinse",
     "Dishcare.Dishwasher.Program.MachineCare": "Machine care",
+    "LaundryCare.Washer.Program.Cotton": "Cotton",
+    "LaundryCare.Washer.Program.Cotton.Eco4060": "Cotton Eco 40-60",
+    "LaundryCare.Washer.Program.EasyCare": "Easy care",
+    "LaundryCare.Washer.Program.Mix": "Mix",
+    "LaundryCare.Washer.Program.DelicatesSilk": "Delicates/silk",
+    "LaundryCare.Washer.Program.Wool": "Wool",
+    "LaundryCare.Washer.Program.RinseSpinDrain": "Rinse, spin, drain",
+    "LaundryCare.Washer.Program.DarkWash": "Dark wash",
+    "LaundryCare.Washer.Program.Sensitive": "Sensitive",
+    "LaundryCare.Washer.Program.Outdoor": "Outdoor",
+    "LaundryCare.Washer.Program.Shirts": "Shirts",
 }
 
 # Deliberately absent: salt, rinse aid and machine-care reporting. Those values
@@ -70,7 +81,15 @@ def _remaining(state: ApplianceState) -> str | None:
     return f"{seconds // 60} min left"
 
 
-def _render_dishwasher(state: ApplianceState, verbose: bool) -> str:
+def _render_cyclic_appliance(
+    state: ApplianceState, verbose: bool, *, finished_message: str
+) -> str:
+    """Shared shape for any appliance that runs one programme to completion.
+
+    Dishwashers and washing machines report the same three things a poll can
+    actually see — operation state, active programme, door state — and differ
+    only in what "done" should be called.
+    """
     operation = _enum_tail(
         state.status.get("BSH.Common.Status.OperationState", "Unknown")
     )
@@ -86,7 +105,7 @@ def _render_dishwasher(state: ApplianceState, verbose: bool) -> str:
         if remaining:
             parts.append(remaining)
     elif operation == "Finished":
-        parts.append("finished — ready to empty")
+        parts.append(finished_message)
     elif operation in ("Inactive", "Ready"):
         parts.append("idle")
     else:
@@ -98,6 +117,18 @@ def _render_dishwasher(state: ApplianceState, verbose: bool) -> str:
         parts.append("door open")
 
     return "  ".join(parts)
+
+
+def _render_dishwasher(state: ApplianceState, verbose: bool) -> str:
+    return _render_cyclic_appliance(
+        state, verbose, finished_message="finished — ready to empty"
+    )
+
+
+def _render_washer(state: ApplianceState, verbose: bool) -> str:
+    return _render_cyclic_appliance(
+        state, verbose, finished_message="finished — ready to unload"
+    )
 
 
 def _render_generic(state: ApplianceState, verbose: bool) -> str:
@@ -136,6 +167,7 @@ def _render_verbose(state: ApplianceState) -> str:
 
 RENDERERS: dict[str, Callable[[ApplianceState, bool], str]] = {
     "Dishwasher": _render_dishwasher,
+    "Washer": _render_washer,
 }
 
 
