@@ -345,14 +345,26 @@ def _display_label(label: str) -> str:
     return label.title()
 
 
-def _group_by_label(found: list[Cycle]) -> dict[str, list[Cycle]]:
-    """Cycles kept apart by appliance, in the order each first appears.
+def _appliance_labels(records: list[dict]) -> list[str]:
+    """Every appliance the log has ever heard from, in first-seen order.
 
-    `found` is already sorted by start time, so a plain dict preserves that
-    as first-seen order — the most natural reading order for a household with
-    more than one appliance.
+    Read from the transitions rather than from `cycles()`: an appliance the
+    recorder knows about but has never seen complete a `Run` — a washing
+    machine only just connected, say — must still get its own (empty)
+    section, not vanish into the other appliance's list.
     """
-    groups: dict[str, list[Cycle]] = {}
+    seen: dict[str, None] = {}
+    for record in sorted(_transitions(records), key=lambda r: r["ts"]):
+        label = record.get("ha")
+        if label:
+            seen.setdefault(label, None)
+    return list(seen)
+
+
+def _group_by_label(records: list[dict], found: list[Cycle]
+                    ) -> dict[str, list[Cycle]]:
+    """Cycles kept apart by appliance, in the order each first appears."""
+    groups: dict[str, list[Cycle]] = {label: [] for label in _appliance_labels(records)}
     for cycle in found:
         groups.setdefault(cycle.label, []).append(cycle)
     return groups
@@ -469,7 +481,7 @@ def render(records: list[dict], skipped: int = 0, *,
         # appliance once more than one has ever run — otherwise a mixed
         # household's runs would sit in a single list with no way to tell
         # the dishwasher's history from the washing machine's.
-        groups = _group_by_label(found)
+        groups = _group_by_label(records, found)
         if len(groups) <= 1:
             cycle_panels = [_cycle_panel(found, expanded)]
         else:
@@ -493,7 +505,7 @@ def render(records: list[dict], skipped: int = 0, *,
                 f"{_plural(gaps, 'coverage gap', ('means', 'mean'))} "
                 "a run or an arrival may have gone unseen.", **_CAVEAT))
     else:
-        groups = _group_by_label(found)
+        groups = _group_by_label(records, found)
         if len(groups) <= 1:
             lines.extend(_cycle_section(found, "Cycles", now))
         else:
