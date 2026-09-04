@@ -169,6 +169,21 @@ def cycle_durations_seconds(found: list[Cycle]) -> list[float]:
     return durations
 
 
+#: The programme's short key as it appears in the log, after `daemon._tail`
+#: has reduced `Dishcare.Dishwasher.Program.MachineCare` to this.
+MACHINE_CARE_PROGRAMME = "MachineCare"
+
+
+def last_machine_care(found: list[Cycle]) -> Cycle | None:
+    """The most recent recorded Machine Care run, or `None`.
+
+    Not limited to the default view's 14-day window: "how long ago" is a
+    standing fact worth showing regardless of how recent it was.
+    """
+    runs = [c for c in found if c.programme == MACHINE_CARE_PROGRAMME]
+    return max(runs, key=lambda c: c.started) if runs else None
+
+
 def commonest_programme(found: list[Cycle]) -> tuple[str, int] | None:
     """The programme run most often, and how many times, or `None`.
 
@@ -463,6 +478,14 @@ def render(records: list[dict], skipped: int = 0, *,
         lines.append(click.style(
             "  Run `homeconnect history -x` for every arrival and the intervals.",
             **_QUIET))
+
+    # --- machine care ---
+    lines.append("")
+    care = last_machine_care(found)
+    if care is not None:
+        lines.append(f"Machine care: last run {_ago(care.started, now)}")
+    else:
+        lines.append(click.style("Machine care: never recorded", **_QUIET))
 
     # --- coverage ---
     lines.append("")

@@ -113,6 +113,51 @@ def test_every_consumable_key_is_one_the_recorder_carries_across_a_poll():
 
     assert set(report.CONSUMABLE_KEYS) <= set(store.EVENT_ONLY_KEYS)
 
+
+# --- Machine care: a standing "last run" fact, not a recent-activity list ---
+
+def test_last_machine_care_picks_out_the_most_recent_run():
+    older = {"ts": "2026-08-01T00:00:00Z", "ha": "dishwasher",
+              "key": "OperationState", "from": "Ready", "to": "Run"}
+    older_prog = {"ts": "2026-08-01T00:00:00Z", "ha": "dishwasher",
+                  "key": "Programme", "from": None, "to": "MachineCare"}
+    older_end = {"ts": "2026-08-01T02:00:00Z", "ha": "dishwasher",
+                 "key": "OperationState", "from": "Run", "to": "Finished"}
+    newer = {"ts": "2026-08-20T00:00:00Z", "ha": "dishwasher",
+             "key": "OperationState", "from": "Ready", "to": "Run"}
+    newer_prog = {"ts": "2026-08-20T00:00:00Z", "ha": "dishwasher",
+                  "key": "Programme", "from": None, "to": "MachineCare"}
+    newer_end = {"ts": "2026-08-20T02:00:00Z", "ha": "dishwasher",
+                 "key": "OperationState", "from": "Run", "to": "Finished"}
+
+    found = report.cycles([older, older_prog, older_end, newer, newer_prog,
+                            newer_end, PROG, RUN, FINISHED])
+
+    care = report.last_machine_care(found)
+    assert care is not None
+    assert care.started == "2026-08-20T00:00:00Z"
+
+
+def test_last_machine_care_is_none_when_never_run():
+    found = report.cycles([RUN, PROG, FINISHED])
+    assert report.last_machine_care(found) is None
+
+
+def test_render_shows_when_machine_care_last_ran():
+    machine_care = {"ts": "2026-08-01T00:00:00Z", "ha": "dishwasher",
+                     "key": "Programme", "from": None, "to": "MachineCare"}
+    records = [dict(RUN, ts="2026-08-01T00:00:00Z"), machine_care,
+               dict(FINISHED, ts="2026-08-01T02:00:00Z")]
+
+    text = plain(report.render(records, now=NOW))
+
+    assert "Machine care: last run 25 days ago" in text
+
+
+def test_render_says_machine_care_never_recorded_when_absent():
+    text = plain(report.render([RUN, FINISHED], now=NOW))
+    assert "Machine care: never recorded" in text
+
 # --- Alerts as arrivals, never as a current state ---------------------------
 #
 # The API sends no all-clear. A consumable alert arrives and is never
