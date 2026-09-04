@@ -340,11 +340,29 @@ def _alert_panel(alert: Alert, now: str
             rows, footer)
 
 
-def _cycle_panel(found: list[Cycle], expanded: bool
+def _display_label(label: str) -> str:
+    """The stored label (an appliance's own lower-cased name) for a heading."""
+    return label.title()
+
+
+def _group_by_label(found: list[Cycle]) -> dict[str, list[Cycle]]:
+    """Cycles kept apart by appliance, in the order each first appears.
+
+    `found` is already sorted by start time, so a plain dict preserves that
+    as first-seen order — the most natural reading order for a household with
+    more than one appliance.
+    """
+    groups: dict[str, list[Cycle]] = {}
+    for cycle in found:
+        groups.setdefault(cycle.label, []).append(cycle)
+    return groups
+
+
+def _cycle_panel(found: list[Cycle], expanded: bool, title: str = "Cycles"
                  ) -> tuple[str, str, list[str], list[str]]:
     """Every run, with the interval since the previous one and the totals."""
     if not found:
-        return ("Cycles", _NEVER_RUN,
+        return (title, _NEVER_RUN,
                 [click.style("no cycles recorded", **_QUIET)], [])
 
     ordered = sorted(found, key=lambda c: c.started)
@@ -390,7 +408,7 @@ def _cycle_panel(found: list[Cycle], expanded: bool
     if summary:
         footer.append(click.style("  ·  ", **_QUIET).join(summary))
 
-    return ("Cycles", _plural(len(ordered), "run"), rows, footer)
+    return (title, _plural(len(ordered), "run"), rows, footer)
 
 
 def _cycle_line(cycle: Cycle) -> str:
@@ -399,6 +417,22 @@ def _cycle_line(cycle: Cycle) -> str:
     return ("  " + click.style(cycle.started, **_STAMP) + "  "
             + (click.style(programme, fg="bright_yellow") + "  " if programme else "")
             + click.style(f"-> {ended}", **_QUIET))
+
+
+def _cycle_section(found: list[Cycle], title: str, now: str) -> list[str]:
+    """The default view's plain-text listing for one appliance's cycles."""
+    lines = [_heading(f"{title}: {len(found)}")]
+    shown = [c for c in found
+             if (days_since(c.started, now) or 0) <= RECENT_DAYS]
+    if len(shown) < len(found):
+        lines.append(click.style(
+            f"  (the {len(shown)} in the last {RECENT_DAYS} days; "
+            f"-x shows all {len(found)})", **_QUIET))
+    if not shown:
+        lines.append(click.style(
+            f"  none in the last {RECENT_DAYS} days", **_QUIET))
+    lines.extend(_cycle_line(cycle) for cycle in shown)
+    return lines
 
 
 def _recent(stamps: list[str], now: str) -> list[str]:
@@ -431,8 +465,20 @@ def render(records: list[dict], skipped: int = 0, *,
             "state.", **_QUIET))
 
         # One width across every panel, so they read as a single column
-        # rather than a ragged stack.
-        panels = [_cycle_panel(found, expanded)] + [
+        # rather than a ragged stack. Split into one cycle panel per
+        # appliance once more than one has ever run — otherwise a mixed
+        # household's runs would sit in a single list with no way to tell
+        # the dishwasher's history from the washing machine's.
+        groups = _group_by_label(found)
+        if len(groups) <= 1:
+            cycle_panels = [_cycle_panel(found, expanded)]
+        else:
+            cycle_panels = [
+                _cycle_panel(subset, expanded,
+                            title=f"{_display_label(label)} cycles")
+                for label, subset in groups.items()
+            ]
+        panels = cycle_panels + [
             _alert_panel(alert, now) for alert in every]
         width = _box_width(panels)
         for panel in panels:
@@ -447,17 +493,16 @@ def render(records: list[dict], skipped: int = 0, *,
                 f"{_plural(gaps, 'coverage gap', ('means', 'mean'))} "
                 "a run or an arrival may have gone unseen.", **_CAVEAT))
     else:
-        lines.append(_heading(f"Cycles: {len(found)}"))
-        shown = [c for c in found
-                 if (days_since(c.started, now) or 0) <= RECENT_DAYS]
-        if len(shown) < len(found):
-            lines.append(click.style(
-                f"  (the {len(shown)} in the last {RECENT_DAYS} days; "
-                f"-x shows all {len(found)})", **_QUIET))
-        if not shown:
-            lines.append(click.style(
-                f"  none in the last {RECENT_DAYS} days", **_QUIET))
-        lines.extend(_cycle_line(cycle) for cycle in shown)
+        groups = _group_by_label(found)
+        if len(groups) <= 1:
+            lines.extend(_cycle_section(found, "Cycles", now))
+        else:
+            for index, (label, subset) in enumerate(groups.items()):
+                if index:
+                    lines.append("")
+                lines.extend(
+                    _cycle_section(subset, f"{_display_label(label)} cycles",
+                                   now))
 
         lines.append("")
         lines.append(_heading(f"Alerts — the last {RECENT_DAYS} days"))
