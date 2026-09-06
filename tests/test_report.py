@@ -79,6 +79,26 @@ def test_coverage_counts_gaps():
     assert latest == "2026-08-27T07:00:00Z"
 
 
+def test_gap_reasons_counts_each_reason_most_common_first():
+    network = {"ts": "2026-08-28T07:00:00Z", "event": "coverage_gap",
+               "from": "2026-08-28T06:00:00Z", "reason": "network_error"}
+    network_2 = {"ts": "2026-08-29T07:00:00Z", "event": "coverage_gap",
+                 "from": "2026-08-29T06:00:00Z", "reason": "network_error"}
+
+    breakdown = report.gap_reasons([GAP, network, network_2])
+
+    assert breakdown == [("network_error", 2), ("stream_lost", 1)]
+
+
+def test_gap_reasons_is_empty_with_no_gaps():
+    assert report.gap_reasons([RUN, FINISHED]) == []
+
+
+def test_expanded_render_breaks_down_gap_reasons():
+    text = report.render([RUN, GAP, FINISHED], expanded=True)
+    assert "stream_lost" in text
+
+
 def test_render_mentions_skipped_lines_when_there_are_any():
     text = report.render([RUN], skipped=3)
     assert "3" in text
