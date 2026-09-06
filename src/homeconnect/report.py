@@ -14,6 +14,7 @@ floor and says so.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 
 import click
@@ -206,6 +207,18 @@ def coverage(records: list[dict]) -> tuple[int, str | None]:
     """How many coverage gaps, and when the most recent one was recorded."""
     stamps = [r["ts"] for r in records if r.get("event") == "coverage_gap"]
     return len(stamps), (max(stamps) if stamps else None)
+
+
+def gap_reasons(records: list[dict]) -> list[tuple[str, int]]:
+    """How many coverage gaps came from each diagnosed cause, most first.
+
+    The reason `daemon.record_gap()` attached (`restart`, `network_error`,
+    `stream_lost`, ...) is otherwise buried in the raw log — this is what a
+    "why do we have gaps" question actually needs.
+    """
+    reasons = [r["reason"] for r in records if r.get("event") == "coverage_gap"]
+    counts = Counter(reasons)
+    return sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
 
 
 # --- presentation ----------------------------------------------------------
@@ -504,6 +517,9 @@ def render(records: list[dict], skipped: int = 0, *,
                 "Counts are at least this many: "
                 f"{_plural(gaps, 'coverage gap', ('means', 'mean'))} "
                 "a run or an arrival may have gone unseen.", **_CAVEAT))
+            for reason, count in gap_reasons(records):
+                lines.append(click.style(
+                    f"  {count:3} {reason}", **_QUIET))
     else:
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
