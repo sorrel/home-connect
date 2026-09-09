@@ -129,11 +129,18 @@ def cycles(records: list[dict]) -> list[Cycle]:
     return sorted(found, key=lambda c: c.started)
 
 
-def alerts(records: list[dict]) -> list[Alert]:
-    """Every arrival of every alert, oldest first, nothing discarded."""
+def alerts(records: list[dict], label: str | None = None) -> list[Alert]:
+    """Every arrival of every alert, oldest first, nothing discarded.
+
+    Consumables are per-machine: passing `label` restricts the count to one
+    appliance, so a household with more than one dishwasher never has their
+    salt or rinse-aid arrivals merged into a single, misleading series.
+    """
     seen: dict[str, list[str]] = {name: [] for name in CONSUMABLE_KEYS}
 
     for record in sorted(_transitions(records), key=lambda r: r["ts"]):
+        if label is not None and record.get("ha") != label:
+            continue
         if record["key"] in seen and record.get("to") == ARRIVED:
             seen[record["key"]].append(record["ts"])
 
@@ -394,6 +401,12 @@ def _group_by_label(records: list[dict], found: list[Cycle]
     return groups
 
 
+def _group_alerts_by_label(records: list[dict]) -> dict[str, list[Alert]]:
+    """Alerts kept apart by appliance, in the order each first appears."""
+    return {label: alerts(records, label=label)
+            for label in _appliance_labels(records)}
+
+
 def _cycle_panel(found: list[Cycle], expanded: bool, title: str = "Cycles"
                  ) -> tuple[str, str, list[str], list[str]]:
     """Every run, with the interval since the previous one and the totals."""
@@ -563,26 +576,34 @@ def render(records: list[dict], skipped: int = 0, *,
             "state.", **_QUIET))
 
         # One width across every panel, so they read as a single column
-        # rather than a ragged stack. Split into one cycle panel per
-        # appliance once more than one has ever run — otherwise a mixed
-        # household's runs would sit in a single list with no way to tell
-        # the dishwasher's history from the washing machine's.
+        # rather than a ragged stack. Once more than one appliance has ever
+        # run, both its cycles and its alerts are grouped under its own
+        # heading — otherwise a mixed household's runs and consumables sit
+        # in two undifferentiated blocks with no way to tell the
+        # dishwasher's salt alerts from the washing machine's.
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
-            cycle_panels = [_cycle_panel(found, expanded)]
+            sections = [(None, [_cycle_panel(found, expanded)]
+                        + [_alert_panel(alert, now) for alert in every])]
         else:
-            cycle_panels = [
-                _cycle_panel(subset, expanded,
-                            title=f"{_display_label(label)} cycles")
+            alert_groups = _group_alerts_by_label(records)
+            sections = [
+                (_display_label(label),
+                 [_cycle_panel(subset, expanded,
+                              title=f"{_display_label(label)} cycles")]
+                 + [_alert_panel(alert, now)
+                    for alert in alert_groups[label]])
                 for label, subset in groups.items()
             ]
-        panels = cycle_panels + [
-            _alert_panel(alert, now) for alert in every]
-        width = _box_width(panels)
-        for panel in panels:
-            lines.append("")
-            lines.extend(_box(*panel, width=width,
-                              quiet_badge=panel[1] in (_NEVER, _NEVER_RUN)))
+        width = _box_width([panel for _, panels in sections for panel in panels])
+        for heading, panels in sections:
+            if heading is not None:
+                lines.append("")
+                lines.append(_heading(heading))
+            for panel in panels:
+                lines.append("")
+                lines.extend(_box(*panel, width=width,
+                                  quiet_badge=panel[1] in (_NEVER, _NEVER_RUN)))
 
         if gaps:
             lines.append("")
@@ -598,21 +619,28 @@ def render(records: list[dict], skipped: int = 0, *,
 
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
-            cycle_panels = [_cycle_panel_recent(found, "Cycles", now)]
+            sections = [(None, [_cycle_panel_recent(found, "Cycles", now)]
+                        + [_alert_panel_recent(alert, now) for alert in every])]
         else:
-            cycle_panels = [
-                _cycle_panel_recent(subset, f"{_display_label(label)} cycles",
-                                    now)
+            alert_groups = _group_alerts_by_label(records)
+            sections = [
+                (_display_label(label),
+                 [_cycle_panel_recent(subset, f"{_display_label(label)} cycles",
+                                      now)]
+                 + [_alert_panel_recent(alert, now)
+                    for alert in alert_groups[label]])
                 for label, subset in groups.items()
             ]
-        panels = cycle_panels + [
-            _alert_panel_recent(alert, now) for alert in every]
-        width = _box_width(panels)
+        width = _box_width([panel for _, panels in sections for panel in panels])
         quiet_badges = (_NEVER, _NEVER_RUN, _NONE_RECENT_ALERT, _NONE_RECENT_RUN)
-        for panel in panels:
-            lines.append("")
-            lines.extend(_box(*panel, width=width,
-                              quiet_badge=panel[1] in quiet_badges))
+        for heading, panels in sections:
+            if heading is not None:
+                lines.append("")
+                lines.append(_heading(heading))
+            for panel in panels:
+                lines.append("")
+                lines.extend(_box(*panel, width=width,
+                                  quiet_badge=panel[1] in quiet_badges))
 
         lines.append("")
         lines.append(click.style(
