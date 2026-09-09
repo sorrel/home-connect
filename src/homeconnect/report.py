@@ -248,6 +248,11 @@ _NEVER = "never fired"
 #: The same, for a log that has yet to see the appliance run.
 _NEVER_RUN = "none recorded"
 
+#: The default view's badges for an alert or a cycle panel with nothing
+#: inside the recent window — quiet, since the record is not actually empty.
+_NONE_RECENT_ALERT = f"none in last {RECENT_DAYS}d"
+_NONE_RECENT_RUN = f"none in last {RECENT_DAYS}d"
+
 
 def _measure(text: str) -> int:
     """Display width of `text` once its colour is stripped.
@@ -442,28 +447,90 @@ def _cycle_panel(found: list[Cycle], expanded: bool, title: str = "Cycles"
     return (title, _plural(len(ordered), "run"), rows, footer)
 
 
-def _cycle_line(cycle: Cycle) -> str:
-    ended = cycle.ended or "still running"
-    programme = cycle.programme
-    return ("  " + click.style(cycle.started, **_STAMP) + "  "
-            + (click.style(programme, fg="bright_yellow") + "  " if programme else "")
-            + click.style(f"-> {ended}", **_QUIET))
+def _cycle_panel_recent(found: list[Cycle], title: str, now: str
+                        ) -> tuple[str, str, list[str], list[str]]:
+    """The default view's boxed cycle panel: last `RECENT_DAYS` only.
+
+    The interval shown on the first visible row is still measured against
+    the run immediately before it, even when that one falls outside the
+    window — otherwise the first `+N days` figure would silently understate
+    the gap.
+    """
+    if not found:
+        return (title, _NEVER_RUN,
+                [click.style("no cycles recorded", **_QUIET)], [])
+
+    ordered = sorted(found, key=lambda c: c.started)
+    recent = [c for c in ordered
+              if (days_since(c.started, now) or 0) <= RECENT_DAYS]
+    if not recent:
+        return (title, _NONE_RECENT_RUN,
+                [click.style(f"none in the last {RECENT_DAYS} days",
+                             **_QUIET)], [])
+
+    programmes = [c.programme or "" for c in recent]
+    width = max(_measure(p) for p in programmes)
+
+    start = ordered.index(recent[0])
+    previous = ordered[start - 1].started if start > 0 else None
+    rows = []
+    for cycle, programme in zip(recent, programmes):
+        took = (_duration(store.elapsed_seconds(cycle.started, cycle.ended) or 0)
+                if cycle.ended else "still running")
+        row = (click.style(cycle.started, **_STAMP) + "  "
+               + (click.style(programme, fg="bright_yellow") if programme else "")
+               + " " * (width - _measure(programme)) + "  "
+               + click.style(f"{took:>13}", **_QUIET))
+        if previous is not None:
+            span = days_since(previous, cycle.started)
+            if span is not None:
+                row += click.style(f"   +{_number(span)} days", **_SPAN)
+        previous = cycle.started
+        rows.append(row)
+
+    footer = []
+    if len(recent) < len(ordered):
+        footer.append(click.style(
+            f"{len(ordered)} recorded in total; -x shows the full record",
+            **_QUIET))
+
+    return (title, _plural(len(recent), "run"), rows, footer)
 
 
-def _cycle_section(found: list[Cycle], title: str, now: str) -> list[str]:
-    """The default view's plain-text listing for one appliance's cycles."""
-    lines = [_heading(f"{title}: {len(found)}")]
-    shown = [c for c in found
-             if (days_since(c.started, now) or 0) <= RECENT_DAYS]
-    if len(shown) < len(found):
-        lines.append(click.style(
-            f"  (the {len(shown)} in the last {RECENT_DAYS} days; "
-            f"-x shows all {len(found)})", **_QUIET))
-    if not shown:
-        lines.append(click.style(
-            f"  none in the last {RECENT_DAYS} days", **_QUIET))
-    lines.extend(_cycle_line(cycle) for cycle in shown)
-    return lines
+def _alert_panel_recent(alert: Alert, now: str
+                        ) -> tuple[str, str, list[str], list[str]]:
+    """The default view's boxed alert panel: last `RECENT_DAYS` only."""
+    if not alert.occurrences:
+        return (alert.name, _NEVER,
+                [click.style("no arrivals recorded", **_QUIET)], [])
+
+    occurrences = list(alert.occurrences)
+    recent = _recent(occurrences, now)
+    if not recent:
+        return (alert.name, _NONE_RECENT_ALERT,
+                [click.style(f"last fired {_ago(alert.last, now)}",
+                             **_QUIET)], [])
+
+    start = len(occurrences) - len(recent)
+    rows = []
+    for index in range(start, len(occurrences)):
+        stamp = occurrences[index]
+        row = click.style(stamp, **_STAMP)
+        if index > 0:
+            span = days_since(occurrences[index - 1], stamp)
+            if span is not None:
+                row += "    " + click.style(f"+{_number(span)} days", **_SPAN)
+        rows.append(row)
+
+    footer = [click.style(f"last arrival {_ago(alert.last, now)}", **_QUIET)]
+    if start > 0:
+        footer.append(click.style(
+            f"{len(occurrences)} recorded in total; -x shows the full record",
+            **_QUIET))
+
+    count = len(recent)
+    return (alert.name, f"{count} arrival{'s' if count != 1 else ''} "
+            f"in {RECENT_DAYS}d", rows, footer)
 
 
 def _recent(stamps: list[str], now: str) -> list[str]:
@@ -527,35 +594,29 @@ def render(records: list[dict], skipped: int = 0, *,
                 lines.append(click.style(
                     f"  {count:3} {reason}", **_QUIET))
     else:
+        lines.append(_heading(f"Last {RECENT_DAYS} days"))
+
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
-            lines.extend(_cycle_section(found, "Cycles", now))
+            cycle_panels = [_cycle_panel_recent(found, "Cycles", now)]
         else:
-            for index, (label, subset) in enumerate(groups.items()):
-                if index:
-                    lines.append("")
-                lines.extend(
-                    _cycle_section(subset, f"{_display_label(label)} cycles",
-                                   now))
+            cycle_panels = [
+                _cycle_panel_recent(subset, f"{_display_label(label)} cycles",
+                                    now)
+                for label, subset in groups.items()
+            ]
+        panels = cycle_panels + [
+            _alert_panel_recent(alert, now) for alert in every]
+        width = _box_width(panels)
+        quiet_badges = (_NEVER, _NEVER_RUN, _NONE_RECENT_ALERT, _NONE_RECENT_RUN)
+        for panel in panels:
+            lines.append("")
+            lines.extend(_box(*panel, width=width,
+                              quiet_badge=panel[1] in quiet_badges))
 
         lines.append("")
-        lines.append(_heading(f"Alerts — the last {RECENT_DAYS} days"))
-        for alert in every:
-            label = f"  {alert.name:22}"
-            if alert.last is None:
-                lines.append(label + click.style("never fired", **_QUIET))
-                continue
-            recent = _recent(list(alert.occurrences), now)
-            body = (click.style(alert.last, **_STAMP) + " "
-                    + click.style(f"({_ago(alert.last, now)})", **_QUIET))
-            if recent:
-                lines.append(label + click.style("fired ", **_CAVEAT) + body
-                             + click.style(f"  x{len(recent)} in window", **_CAVEAT))
-            else:
-                lines.append(label + click.style("last fired ", **_QUIET) + body)
-        lines.append("")
         lines.append(click.style(
-            "  Run `homeconnect history -x` for every arrival and the intervals.",
+            "Run `homeconnect history -x` for every arrival and the intervals.",
             **_QUIET))
 
     # --- machine care ---
