@@ -30,6 +30,8 @@ EVENT_ONLY_KEYS = (
     "SaltNearlyEmpty",
     "RinseAidNearlyEmpty",
     "MachineCareReminder",
+    "IDos1FillLevelPoor",
+    "IDos2FillLevelPoor",
     "SelectedProgramme",
 )
 

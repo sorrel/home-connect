@@ -25,7 +25,13 @@ from .present import display_width
 #: The consumables this report answers for, in the order it lists them. Every
 #: one is a `store.EVENT_ONLY_KEYS` member — it has to be, since none can be
 #: polled — and `tests/test_report.py` holds that relationship in place.
-CONSUMABLE_KEYS = ("SaltNearlyEmpty", "RinseAidNearlyEmpty", "MachineCareReminder")
+CONSUMABLE_KEYS = (
+    "SaltNearlyEmpty",
+    "RinseAidNearlyEmpty",
+    "MachineCareReminder",
+    "IDos1FillLevelPoor",
+    "IDos2FillLevelPoor",
+)
 
 #: The only transition that counts as an alert arriving.
 ARRIVED = "Present"
