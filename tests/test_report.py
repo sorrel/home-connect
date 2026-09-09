@@ -73,6 +73,38 @@ def test_interleaved_cycles_from_two_appliances_are_kept_apart():
     assert found["dryer"].ended == "2026-08-26T11:00:00Z"
 
 
+def test_render_groups_cycles_and_alerts_under_each_machine():
+    """With more than one appliance ever seen, both the cycles and the
+    alerts belonging to one machine must sit together under its own
+    heading, not be split into an all-cycles block and an all-alerts block
+    that mixes both machines' consumables together."""
+    washer_run = {"ts": "2026-08-26T08:00:00Z", "ha": "washer",
+                  "key": "OperationState", "from": "Ready", "to": "Run"}
+    washer_end = {"ts": "2026-08-26T10:00:00Z", "ha": "washer",
+                  "key": "OperationState", "from": "Run", "to": "Finished"}
+    dryer_run = {"ts": "2026-08-26T09:00:00Z", "ha": "dryer",
+                 "key": "OperationState", "from": "Ready", "to": "Run"}
+    dryer_end = {"ts": "2026-08-26T11:00:00Z", "ha": "dryer",
+                 "key": "OperationState", "from": "Run", "to": "Finished"}
+    washer_salt = dict(SALT_LOW, ha="washer", ts="2026-08-26T07:00:00Z")
+
+    for expanded in (False, True):
+        text = plain(report.render(
+            [washer_run, washer_end, dryer_run, dryer_end, washer_salt],
+            expanded=expanded, now=NOW))
+
+        washer_at = text.index("Washer")
+        washer_cycles_at = text.index("Washer cycles")
+        washer_salt_at = text.index("SaltNearlyEmpty")
+        dryer_at = text.index("Dryer")
+        dryer_cycles_at = text.index("Dryer cycles")
+
+        # The washer's heading, its cycles panel and its alert panel all
+        # come before the dryer's section starts.
+        assert washer_at < washer_cycles_at < washer_salt_at < dryer_at
+        assert dryer_at < dryer_cycles_at
+
+
 def test_coverage_counts_gaps():
     count, latest = report.coverage([RUN, GAP, FINISHED])
     assert count == 1
@@ -224,6 +256,28 @@ def test_a_transition_away_from_present_is_not_an_arrival():
     send something else, it must not be counted as the alert firing."""
     found = {a.name: a for a in report.alerts([dict(SALT_LOW, to="Absent")])}
     assert found["SaltNearlyEmpty"].occurrences == ()
+
+
+def test_alerts_can_be_filtered_to_one_appliance():
+    """Consumables are per-machine: two dishwashers' salt alerts must not be
+    merged into one series, or neither machine's true frequency is reported."""
+    washer_salt = dict(SALT_LOW, ha="washer", ts="2026-08-01T00:00:00Z")
+    dryer_salt = dict(SALT_LOW, ha="dryer", ts="2026-08-02T00:00:00Z")
+
+    found = {a.name: a for a in report.alerts([washer_salt, dryer_salt],
+                                               label="washer")}
+
+    assert found["SaltNearlyEmpty"].occurrences == ("2026-08-01T00:00:00Z",)
+
+
+def test_alerts_default_to_every_appliance_when_no_label_given():
+    washer_salt = dict(SALT_LOW, ha="washer", ts="2026-08-01T00:00:00Z")
+    dryer_salt = dict(SALT_LOW, ha="dryer", ts="2026-08-02T00:00:00Z")
+
+    found = {a.name: a for a in report.alerts([washer_salt, dryer_salt])}
+
+    assert found["SaltNearlyEmpty"].occurrences == (
+        "2026-08-01T00:00:00Z", "2026-08-02T00:00:00Z")
 
 
 def test_intervals_are_the_days_between_consecutive_arrivals():
