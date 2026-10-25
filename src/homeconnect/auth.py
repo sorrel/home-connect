@@ -32,7 +32,8 @@ from keyring.errors import KeyringError  # noqa: F401  (re-exported)
 #: guidance rather than a traceback. Re-exporting it here means neither of
 #: them has to import `keyring` itself just to name the failure.
 __all__ = [
-    "AuthorisationPending", "Credentials", "DeviceCode", "KeyringError",
+    "AuthorisationPending", "Credentials", "CredentialsUnavailable",
+    "DeviceCode", "KeyringError",
     "MissingCredentials", "NotAuthenticated", "SCOPE", "access_token",
     "begin_device_authorisation", "dotenv_path", "load_credentials",
     "load_dotenv_bounded", "redeem_device_code",
@@ -60,6 +61,16 @@ _TIMEOUT = 30
 
 class MissingCredentials(Exception):
     """The client ID is not present in the environment."""
+
+
+class CredentialsUnavailable(MissingCredentials):
+    """The `.env` could not be read in time — almost always a locked 1Password.
+
+    A subclass, so anything catching `MissingCredentials` behaves as before.
+    Only the recorder cares about the distinction: this one is worth waiting
+    out, where a plain `MissingCredentials` (the read worked but the ID is not
+    in it) is a configuration fault that no amount of waiting will fix.
+    """
 
 
 class NotAuthenticated(Exception):
@@ -293,7 +304,7 @@ def load_credentials() -> Credentials:
     loaded = load_dotenv_bounded()
     client_id = os.environ.get("HOMECONNECT_CLIENT_ID")
     if not client_id and not loaded:
-        raise MissingCredentials(
+        raise CredentialsUnavailable(
             "Timed out reading .env after "
             f"{ENV_READ_TIMEOUT:.0f}s — is 1Password unlocked? It streams the "
             "'Home Connect' environment through that file on demand, so a "

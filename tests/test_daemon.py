@@ -1237,24 +1237,67 @@ def test_run_logs_how_long_coverage_was_lost_when_it_resumes(tmp_path, capsys):
 # --- Escalation: an outage the backoff loop alone never clears --------------
 
 
-def test_run_raises_after_a_coverage_gap_exceeds_the_escalation_threshold(tmp_path):
+def test_run_keeps_going_after_a_coverage_gap_exceeds_the_escalation_threshold(
+    tmp_path, capsys, monkeypatch,
+):
+    """Escalating used to exit for launchd to restart the process. A fresh
+    process must re-read the 1Password `.env`, and with 1Password locked that
+    cost hours of coverage after outages the restart never fixed, so a long
+    outage is now announced and retried in place with the credentials held."""
+    monkeypatch.setattr(daemon, "notify_desktop", lambda _: None)
     events_path = tmp_path / "events.jsonl"
     state_path = tmp_path / "state.json"
 
     def build_client():
         raise requests.ConnectionError("still down")
 
-    with pytest.raises(daemon.CoverageExhausted):
-        daemon.run(
-            build_client=build_client,
-            session_factory=lambda: None,
-            events_path=events_path,
-            state_path=state_path,
-            sleep=lambda _: None,
-            delays=iter([0.0] * 10),
-            now=_stamps(step_seconds=1000),
-            iterations=5,
-        )
+    daemon.run(
+        build_client=build_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=1000),
+        iterations=5,
+    )
+    # Reaching here at all is the main assertion: nothing was raised.
+
+    err = capsys.readouterr().err
+    assert err.count("coverage lost for") == 1, "announced once, not every cycle"
+    assert "restarting" not in err
+
+
+def test_run_recovers_in_place_after_an_escalated_outage(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(daemon, "notify_desktop", lambda _: None)
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    attempts = iter([requests.ConnectionError("down")] * 4 + [None])
+
+    def build_client():
+        problem = next(attempts)
+        if problem is not None:
+            raise problem
+        return _dishwasher_client()
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=1000),
+        iterations=5,
+    )
+
+    assert "coverage lost for" in capsys.readouterr().err
+    records, _ = store.read_records(events_path)
+    gaps = [
+        r for r in records
+        if r.get("event") == "coverage_gap" and r.get("reason") == "network_error"
+    ]
+    assert len(gaps) == 1, "the whole outage is still one honest gap marker"
 
 
 def test_run_does_not_escalate_a_gap_under_the_threshold(tmp_path):
@@ -1295,36 +1338,124 @@ def test_run_notifies_desktop_when_escalating(tmp_path, monkeypatch):
     def build_client():
         raise requests.ConnectionError("still down")
 
-    with pytest.raises(daemon.CoverageExhausted):
-        daemon.run(
-            build_client=build_client,
-            session_factory=lambda: None,
-            events_path=events_path,
-            state_path=state_path,
-            sleep=lambda _: None,
-            delays=iter([0.0] * 10),
-            now=_stamps(step_seconds=1000),
-            iterations=5,
-        )
+    daemon.run(
+        build_client=build_client,
+        session_factory=lambda: None,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=1000),
+        iterations=5,
+    )
 
     assert len(notified) == 1, "one notification for the whole outage, not one per retry"
 
 
-def test_main_returns_nonzero_on_coverage_exhausted(monkeypatch):
-    monkeypatch.setattr(daemon.auth, "load_credentials", lambda: object())
+def test_run_notifies_again_for_a_second_separate_outage(tmp_path, monkeypatch):
+    events_path = tmp_path / "events.jsonl"
+    state_path = tmp_path / "state.json"
+    notified: list[str] = []
+    monkeypatch.setattr(daemon, "notify_desktop", notified.append)
+    down = requests.ConnectionError("down")
+    attempts = iter([down, down, down, None, down, down, down, None])
+
+    def build_client():
+        problem = next(attempts)
+        if problem is not None:
+            raise problem
+        return _dishwasher_client()
+
+    daemon.run(
+        build_client=build_client,
+        session_factory=_SilentStreamSession,
+        events_path=events_path,
+        state_path=state_path,
+        sleep=lambda _: None,
+        delays=iter([0.0] * 10),
+        now=_stamps(step_seconds=1000),
+        iterations=8,
+    )
+
+    assert len(notified) == 2, "each long outage is announced in its own right"
+
+
+# --- Start-up: a locked 1Password is waited out, not crash-looped ------------
+
+
+def _locked(times: int, credentials: object):
+    """A `load_credentials` that times out `times` times, then succeeds."""
+    calls = iter([auth.CredentialsUnavailable("Timed out reading .env")] * times)
+
+    def load():
+        problem = next(calls, None)
+        if problem is not None:
+            raise problem
+        return credentials
+
+    return load
+
+
+def test_wait_for_credentials_returns_at_once_when_1password_is_unlocked(capsys):
+    sleeps: list[float] = []
+    held = object()
+
+    assert daemon.wait_for_credentials(_locked(0, held), sleep=sleeps.append) is held
+    assert sleeps == []
+    assert capsys.readouterr().err == ""
+
+
+def test_wait_for_credentials_waits_out_a_lock_and_says_so_once_each_way(capsys):
+    """Launchd used to restart a locked recorder every minute, each start
+    logging the same timeout, which is how `recorder.err` reached 7,000 lines.
+    One line when waiting starts, one when it ends."""
+    sleeps: list[float] = []
+    held = object()
+
+    got = daemon.wait_for_credentials(
+        _locked(5, held), sleep=sleeps.append, now=_stamps(step_seconds=60),
+    )
+
+    assert got is held
+    assert sleeps == [daemon.CREDENTIALS_RETRY_SECONDS] * 5
+    captured = capsys.readouterr()
+    assert captured.err.count("Timed out") == 1
+    assert "waiting" in captured.err.lower()
+    assert "1Password" in captured.out and "after" in captured.out
+
+
+def test_wait_for_credentials_does_not_wait_on_a_configuration_fault():
+    """An unset client ID is not a lock: no amount of waiting would fix it."""
+    def load():
+        raise auth.MissingCredentials("HOMECONNECT_CLIENT_ID is not set")
+
+    with pytest.raises(auth.MissingCredentials):
+        daemon.wait_for_credentials(load, sleep=lambda _: pytest.fail("waited"))
+
+
+def test_main_waits_for_1password_rather_than_exiting(monkeypatch):
+    monkeypatch.setattr(daemon.auth, "load_credentials", _locked(3, object()))
+    monkeypatch.setattr(daemon.time, "sleep", lambda _: None)
 
     @contextlib.contextmanager
     def fake_lock():
         yield
 
     monkeypatch.setattr(daemon.store, "single_instance_lock", fake_lock)
+    ran: list[bool] = []
+    monkeypatch.setattr(daemon, "run", lambda **kwargs: ran.append(True))
 
-    def fake_run(**kwargs):
-        raise daemon.CoverageExhausted("coverage lost for 1900s")
+    assert daemon.main() == 0
+    assert ran == [True]
 
-    monkeypatch.setattr(daemon, "run", fake_run)
 
-    assert daemon.main() == 5
+def test_main_still_exits_on_a_configuration_fault(monkeypatch):
+    def load():
+        raise auth.MissingCredentials("HOMECONNECT_CLIENT_ID is not set")
+
+    monkeypatch.setattr(daemon.auth, "load_credentials", load)
+
+    assert daemon.main() == 2
 
 
 def test_notify_desktop_never_raises_when_osascript_is_unavailable(monkeypatch):
