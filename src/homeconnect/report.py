@@ -33,6 +33,20 @@ CONSUMABLE_KEYS = (
     "IDos2FillLevelPoor",
 )
 
+#: Which consumables belong to which kind of machine, and the keys that give
+#: a machine away as that kind. The log records no appliance type, only the
+#: label, so the kind is read from what the machine has been heard to say:
+#: the `IDos*Active` options accompany every programme on a washing machine
+#: with i-Dos, and the dishwasher options here accompany every one of its.
+#: A machine that has said nothing telling is shown every consumable, since
+#: hiding one would be a guess.
+_CONSUMABLE_KINDS = (
+    (("SaltNearlyEmpty", "RinseAidNearlyEmpty", "MachineCareReminder"),
+     ("VarioSpeedPlus", "ExtraDry", "HalfLoad")),
+    (("IDos1FillLevelPoor", "IDos2FillLevelPoor"),
+     ("IDos1Active", "IDos2Active")),
+)
+
 #: The only transition that counts as an alert arriving.
 ARRIVED = "Present"
 
@@ -145,6 +159,21 @@ def alerts(records: list[dict], label: str | None = None) -> list[Alert]:
             seen[record["key"]].append(record["ts"])
 
     return [Alert(name, tuple(stamps)) for name, stamps in seen.items()]
+
+
+def consumables_for(records: list[dict], label: str) -> tuple[str, ...]:
+    """The consumables that can belong to `label`, in `CONSUMABLE_KEYS` order.
+
+    Every machine was once shown every consumable, which put
+    "IDos1FillLevelPoor: never fired" under a dishwasher — true, but only
+    because a dishwasher has no i-Dos to run low.
+    """
+    heard = {r["key"] for r in _transitions(records) if r.get("ha") == label}
+    owned = {key
+             for consumables, giveaways in _CONSUMABLE_KINDS
+             if heard & (set(consumables) | set(giveaways))
+             for key in consumables}
+    return tuple(k for k in CONSUMABLE_KEYS if not owned or k in owned)
 
 
 def intervals_days(occurrences: tuple[str, ...] | list[str]) -> list[float]:
@@ -403,8 +432,12 @@ def _group_by_label(records: list[dict], found: list[Cycle]
 
 def _group_alerts_by_label(records: list[dict]) -> dict[str, list[Alert]]:
     """Alerts kept apart by appliance, in the order each first appears."""
-    return {label: alerts(records, label=label)
-            for label in _appliance_labels(records)}
+    grouped = {}
+    for label in _appliance_labels(records):
+        owned = consumables_for(records, label)
+        grouped[label] = [a for a in alerts(records, label=label)
+                          if a.name in owned]
+    return grouped
 
 
 def _cycle_panel(found: list[Cycle], expanded: bool, title: str = "Cycles"
@@ -568,6 +601,10 @@ def render(records: list[dict], skipped: int = 0, *,
 
     found = cycles(records)
     every = alerts(records)
+    labels = _appliance_labels(records)
+    if len(labels) == 1:
+        owned = consumables_for(records, labels[0])
+        every = [alert for alert in every if alert.name in owned]
 
     if expanded:
         lines.append(_heading("The complete record"))

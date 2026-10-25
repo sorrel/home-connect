@@ -105,6 +105,38 @@ def test_render_groups_cycles_and_alerts_under_each_machine():
         assert dryer_at < dryer_cycles_at
 
 
+def test_each_machine_is_shown_only_its_own_kind_of_consumable():
+    """i-Dos detergent is a washing machine's; salt, rinse aid and machine
+    care are a dishwasher's. Listing every consumable under every machine
+    put "IDos1FillLevelPoor: never fired" under the dishwasher, which reads
+    as a fact about the dishwasher when it is merely a key it cannot have."""
+    dishwasher_rinse = {"ts": "2026-08-26T07:00:00Z", "ha": "hektor",
+                        "key": "RinseAidNearlyEmpty", "from": None,
+                        "to": "Present"}
+    washer_idos = {"ts": "2026-08-26T08:00:00Z", "ha": "otto",
+                   "key": "IDos1FillLevelPoor", "from": None, "to": "Present"}
+
+    for expanded in (False, True):
+        text = plain(report.render([dishwasher_rinse, washer_idos],
+                                   expanded=expanded, now=NOW))
+        dishwasher, washer = text.split("\nOtto")
+
+        assert "SaltNearlyEmpty" in dishwasher
+        assert "IDos" not in dishwasher
+        assert "IDos1FillLevelPoor" in washer
+        assert "IDos2FillLevelPoor" in washer
+        assert "SaltNearlyEmpty" not in washer
+        assert "RinseAidNearlyEmpty" not in washer
+
+
+def test_a_machine_of_unknown_kind_is_still_shown_every_consumable():
+    """With nothing yet to say which kind of machine it is, hiding a panel
+    would be a guess; showing them all is merely untidy."""
+    text = plain(report.render([RUN, FINISHED], now=NOW))
+    for name in report.CONSUMABLE_KEYS:
+        assert name in text
+
+
 def test_coverage_counts_gaps():
     count, latest = report.coverage([RUN, GAP, FINISHED])
     assert count == 1
