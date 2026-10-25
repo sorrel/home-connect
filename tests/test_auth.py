@@ -471,6 +471,21 @@ def test_load_credentials_says_so_when_the_env_read_times_out(tmp_path, monkeypa
 
     assert "1Password" in str(caught.value)
     assert "Timed out" in str(caught.value)
+    assert isinstance(caught.value, auth.CredentialsUnavailable), (
+        "a lock is worth waiting out, so the recorder must be able to tell it apart"
+    )
+
+
+def test_load_credentials_unset_client_id_is_not_mistaken_for_a_lock(monkeypatch):
+    """A read that succeeded but lacks the ID is a configuration fault: waiting
+    for 1Password would never fix it, so it must not look like a lock."""
+    monkeypatch.delenv("HOMECONNECT_CLIENT_ID", raising=False)
+    monkeypatch.setattr(auth, "load_dotenv_bounded", lambda *a, **k: True)
+
+    with pytest.raises(auth.MissingCredentials) as caught:
+        auth.load_credentials()
+
+    assert not isinstance(caught.value, auth.CredentialsUnavailable)
 
 
 def test_load_credentials_timeout_message_never_leaks_the_secret(monkeypatch):

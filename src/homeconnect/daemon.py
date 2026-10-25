@@ -44,14 +44,25 @@ GAP_THRESHOLD_SECONDS = 120
 #: is how a quota stays exhausted. Half an hour, and the stream is unaffected.
 QUOTA_BACKOFF_SECONDS = 1800
 
-#: How long a single, unresolved outage may run before the in-process backoff
-#: loop gives up and asks launchd for a fresh start instead. Above
-#: GAP_THRESHOLD_SECONDS (noise) and in the same order as QUOTA_BACKOFF_SECONDS
-#: (a wait that is known to resolve itself) — this is for outages the backoff
-#: sequence alone has already failed to clear, such as the 11-hour stall a
-#: wedged socket or a stale DNS answer can cause even while the machine is
-#: awake and the backoff keeps retrying every five minutes.
+#: How long a single, unresolved outage may run before it is announced — a
+#: desktop notification and one log line — so that a stuck-but-awake
+#: connection, such as the 11-hour stall of 1 September 2026, does not go on
+#: silently. Above GAP_THRESHOLD_SECONDS (noise) and in the same order as
+#: QUOTA_BACKOFF_SECONDS (a wait that is known to resolve itself).
+#:
+#: Announced, not acted on. This used to exit so that launchd would relaunch
+#: the process, but every cycle already builds a fresh client and HTTP session,
+#: so a relaunch bought nothing a retry does not — and a fresh process must
+#: re-read the 1Password `.env`. With 1Password locked, as it usually is
+#: overnight, 29 of 33 such restarts in October 2026 then sat unable to start
+#: for hours after the network had come back.
 COVERAGE_ESCALATION_SECONDS = 1800
+
+#: How long to wait between attempts to read the `.env` while 1Password is
+#: locked at start-up. Each attempt itself waits up to `auth.ENV_READ_TIMEOUT`
+#: for 1Password to answer, so this is a pause between asks, not the whole
+#: cadence. It matches the launchd throttle that used to pace the same retry.
+CREDENTIALS_RETRY_SECONDS = 60
 
 #: Stream keys that name a concept the poll already has a name for. Folded at
 #: the point events are applied, so one concept has exactly one name in the
@@ -260,18 +271,6 @@ class AuthenticationExhausted(Exception):
     """
 
 
-class CoverageExhausted(Exception):
-    """A single interruption has run longer than COVERAGE_ESCALATION_SECONDS.
-
-    The in-process backoff loop tops out at five minutes and retries forever,
-    which is right for a genuine blip but does nothing for a connection wedged
-    in some other way — a poisoned resolver cache, a socket that never times
-    out cleanly. Exiting lets launchd relaunch the whole process: a fresh
-    interpreter, fresh DNS resolution, fresh everything, which is strictly
-    more than another retry inside the same process can offer.
-    """
-
-
 def notify_desktop(message: str) -> None:
     """Best-effort macOS notification.
 
@@ -458,6 +457,9 @@ def run(
 
     coverage_lost_at: str | None = None
     coverage_lost_reason: str | None = None
+    # Whether the current outage has already been announced, so a long one
+    # produces one notification rather than one per retry.
+    escalated = False
     consecutive_auth_failures = 0
 
     completed = 0
@@ -498,6 +500,7 @@ def run(
                     )
                 coverage_lost_at = None
                 coverage_lost_reason = None
+                escalated = False
 
             unknown_haid_events: list[None] = []
             token = token_holder.get() if token_holder else ""
@@ -616,18 +619,19 @@ def run(
         # cycle, not a stuck outage) leaves a *different* value here, and
         # must not be mistaken for one continuous, unresolved interruption.
         if (
-            coverage_lost_at_start is not None
+            not escalated
+            and coverage_lost_at_start is not None
             and coverage_lost_at == coverage_lost_at_start
         ):
             span = store.elapsed_seconds(coverage_lost_at, now())
             if span is not None and span >= COVERAGE_ESCALATION_SECONDS:
                 message = (
                     f"coverage lost for {span:.0f}s and counting "
-                    f"({coverage_lost_reason or 'unknown'}) — restarting"
+                    f"({coverage_lost_reason or 'unknown'}) — still retrying"
                 )
                 notify_desktop(f"Home Connect recorder: {message}")
                 log(message, error=True)
-                raise CoverageExhausted(message)
+                escalated = True
 
         store.save_state(state, state_path)
 
@@ -641,13 +645,57 @@ def run(
             sleep(QUOTA_BACKOFF_SECONDS if hit_quota else next(delays))
 
 
+def wait_for_credentials(
+    load: Callable[[], Any],
+    sleep: Callable[[float], None] | None = None,
+    now: Callable[[], str] = store.utc_now,
+) -> Any:
+    """Return `load()`'s credentials, waiting out a locked 1Password.
+
+    Exiting on a lock and letting launchd restart the process paced the retry
+    just the same, but logged the identical timeout once a minute for as long
+    as the lock lasted — over 7,000 lines in `recorder.err` by October 2026.
+    Waiting here says so once when it starts and once when it ends.
+
+    Only `auth.CredentialsUnavailable` is waited out. Any other
+    `MissingCredentials` means the `.env` was read and the client ID is not in
+    it, which waiting cannot fix, so it propagates for `main()` to exit on.
+    """
+    # Resolved at call time rather than as a default argument, so the one
+    # `time.sleep` the rest of the module uses is also the one this waits on.
+    if sleep is None:
+        sleep = time.sleep
+    waiting_since: str | None = None
+    while True:
+        try:
+            credentials = load()
+        except auth.CredentialsUnavailable as exc:
+            if waiting_since is None:
+                waiting_since = now()
+                log(
+                    f"{exc} Waiting for it, retrying every "
+                    f"{CREDENTIALS_RETRY_SECONDS:.0f}s.",
+                    error=True,
+                )
+            sleep(CREDENTIALS_RETRY_SECONDS)
+            continue
+        if waiting_since is not None:
+            span = store.elapsed_seconds(waiting_since, now())
+            length = "an unknown period" if span is None else f"{span:.0f}s"
+            log(f"credentials read from 1Password after waiting {length}")
+        return credentials
+
+
 def main() -> int:
     """Console-script entry point for the recorder."""
     try:
-        credentials = auth.load_credentials()
+        credentials = wait_for_credentials(auth.load_credentials)
     except auth.MissingCredentials as exc:
         log(f"{exc}", error=True)
         return 2
+    except KeyboardInterrupt:
+        log("recorder stopped by interrupt")
+        return 0
 
     token_holder = TokenHolder(lambda: auth.access_token(credentials))
     log("recorder starting")
@@ -665,9 +713,6 @@ def main() -> int:
     except AuthenticationExhausted as exc:
         log(f"{exc}", error=True)
         return 4
-    except CoverageExhausted as exc:
-        log(f"{exc}", error=True)
-        return 5
     except KeyboardInterrupt:
         log("recorder stopped by interrupt")
         return 0

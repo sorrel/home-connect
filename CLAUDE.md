@@ -122,8 +122,14 @@ launchd/
   to happen at boot, before the recorder logged anything, with `KeepAlive`
   powerless because the process never exited. `load_dotenv_bounded()` now reads
   it under `ENV_READ_TIMEOUT` (O_NONBLOCK plus a poll for the writer) and
-  raises `MissingCredentials` naming 1Password, so launchd retries instead. The
-  refresh token is stored in the Keychain and rotates on every use; the
+  raises `CredentialsUnavailable` (a `MissingCredentials`) naming 1Password.
+  The recorder's `wait_for_credentials()` waits that out in-process, logging
+  once when it starts waiting and once when it gets in; a plain
+  `MissingCredentials` — the read worked but the ID is absent — still exits.
+  The credentials are then held in memory for the life of the process, which
+  is why the recorder must not exit to recover from an outage: a fresh process
+  has to read the `.env` again, and 1Password is usually locked by then (see
+  `COVERAGE_ESCALATION_SECONDS`). The refresh token is stored in the Keychain and rotates on every use; the
   rotated value is always written back, since Home Connect invalidates the
   previous one.
 - **`api.py`** — thin wrapper over `https://api.home-connect.com/api`.

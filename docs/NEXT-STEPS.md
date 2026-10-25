@@ -5,17 +5,34 @@ built, reviewed, published and running. 182 tests pass; CI is green.
 
 ## Do this first
 
-The recorder currently running was started before the timestamped-logging
-change. Pick it up with:
+The recorder no longer exits after a long outage, and it waits out a locked
+1Password at start-up instead of crash-looping (October 2026, see below). The
+running process is still the old code until it is restarted:
 
 ```bash
-launchd/install.sh      # unloads and reloads; the event log is untouched
-: > data/recorder.err   # clear the stale RVM noise from the old shell-based plist
+launchctl kickstart -k gui/$(id -u)/com.homeconnect.recorder
 ```
 
-After that, every line in `recorder.log` and `recorder.err` carries a UTC
-instant, and the log records when the recorder starts and stops — so it shows
-signs of life instead of staying empty.
+Do it with 1Password unlocked, so the new process gets in at once.
+`recorder.err` is around 1.3 MB of the old once-a-minute timeout; it can be
+cleared with `: > data/recorder.err` once nothing in it is still wanted.
+
+## Recorder restarts and 1Password (25 October 2026)
+
+The recorder reads the 1Password `.env` once, at start-up, and holds the
+credentials in memory, so a lock while it runs costs nothing. What did cost
+coverage was restarting. A network outage longer than
+`COVERAGE_ESCALATION_SECONDS` made it exit so launchd would relaunch it; the
+new process had to read the `.env` again, 1Password was usually locked by then,
+and it retried once a minute until someone unlocked it. 29 of the 33 locked
+spells in `recorder.err` began that way, several lasting all night on a Mac
+mini that was awake throughout. The restart itself bought nothing: every cycle
+already builds a fresh client and HTTP session.
+
+Now a long outage is announced once (notification plus one log line) and
+retried in place, and a locked 1Password at start-up — after a reboot or login
+— is waited out with one line when waiting begins and one when it ends.
+1Password needs unlocking once per boot, not once per outage.
 
 ## What to expect over the first weeks
 
