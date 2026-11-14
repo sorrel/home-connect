@@ -24,7 +24,10 @@ STATE = ApplianceState(
 )
 
 
-def patch_backend(monkeypatch, states=(STATE,)):
+def patch_backend(monkeypatch, states=(STATE,), details=None):
+    # Never the real local file: the suite must not depend on, or print,
+    # identifiers that live only on this machine.
+    monkeypatch.setattr(cli_module.store, "load_details", lambda: details or {})
     credentials = cli_module.auth.Credentials(client_id="client-1", client_secret="s")
     monkeypatch.setattr(cli_module.auth, "load_credentials", lambda: credentials)
     monkeypatch.setattr(cli_module.auth, "access_token", lambda creds: "tok")
@@ -56,6 +59,24 @@ def test_json_flag_emits_parseable_json(monkeypatch):
     payload = json.loads(result.output)
     assert payload[0]["name"] == "Dishwasher"
     assert payload[0]["programme"] == "Dishcare.Dishwasher.Program.Eco50"
+    assert payload[0]["enumber"] == "SMV6ZCX01G/40"
+    assert payload[0]["details"] == {}
+
+
+def test_json_includes_the_identifiers_from_the_local_file(monkeypatch):
+    patch_backend(monkeypatch, details={"dishwasher": {"serial": "0001"}})
+
+    result = CliRunner().invoke(cli_module.cli, ["--json"])
+
+    assert json.loads(result.output)[0]["details"] == {"serial": "0001"}
+
+
+def test_verbose_shows_the_identifiers_from_the_local_file(monkeypatch):
+    patch_backend(monkeypatch, details={"dishwasher": {"serial": "0001"}})
+
+    result = CliRunner().invoke(cli_module.cli, ["--verbose"])
+
+    assert "Serial number" in result.output and "0001" in result.output
 
 
 def test_appliance_filter_matches_name_or_type(monkeypatch):

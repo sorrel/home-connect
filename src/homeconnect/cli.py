@@ -12,7 +12,7 @@ import time
 import click
 import requests
 
-from . import api, appliances, auth, present
+from . import api, appliances, auth, present, store
 from . import help as help_module
 
 
@@ -129,12 +129,18 @@ def cli(ctx, verbose: bool, as_json: bool, appliance: str | None) -> None:
         _run(lambda item=item: appliances.fetch_state(client, item)) for item in found
     ]
 
+    details = store.load_details()
+
     if as_json:
         click.echo(json.dumps([
             {
                 "haId": state.appliance.ha_id,
                 "name": state.appliance.name,
                 "type": state.appliance.type,
+                "brand": state.appliance.brand,
+                "vib": state.appliance.vib,
+                "enumber": state.appliance.enumber,
+                "details": store.details_for(details, state.appliance.name),
                 "connected": state.appliance.connected,
                 "programme": state.programme.key if state.programme else None,
                 "status": state.status,
@@ -145,7 +151,9 @@ def cli(ctx, verbose: bool, as_json: bool, appliance: str | None) -> None:
         return
 
     for state in states:
-        click.echo(present.render(state, verbose=verbose))
+        click.echo(present.render(
+            state, verbose=verbose,
+            details=store.details_for(details, state.appliance.name)))
 
 
 @cli.command(name="auth")

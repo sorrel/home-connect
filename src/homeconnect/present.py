@@ -171,10 +171,48 @@ RENDERERS: dict[str, Callable[[ApplianceState, bool], str]] = {
 }
 
 
-def render(state: ApplianceState, verbose: bool = False) -> str:
-    """Render one appliance's state as text."""
-    if not state.appliance.connected:
-        return f"{state.appliance.name}  offline"
+#: The identifiers `--verbose` shows, in order, as (label, API attribute,
+#: key in the local details file). The model and E-number come from the API;
+#: the rest appear only in the Home Connect app and are copied into the file.
+_IDENTIFIERS = (
+    ("Model", "vib", None),
+    ("E-number", "enumber", "enumber"),
+    ("Serial number", None, "serial"),
+    ("FD number", None, "fd"),
+    ("Z-number", None, "z"),
+    ("Version", None, "version"),
+    ("SW version", None, "sw_version"),
+)
 
-    renderer = RENDERERS.get(state.appliance.type, _render_generic)
-    return renderer(state, verbose)
+
+def _identifier_lines(state: ApplianceState, details: dict[str, str]) -> list[str]:
+    found = []
+    for label, attribute, key in _IDENTIFIERS:
+        value = getattr(state.appliance, attribute) if attribute else None
+        value = value or (details.get(key) if key else None)
+        if value:
+            found.append((label, value))
+    width = max((display_width(label) for label, _ in found), default=0)
+    return [f"  {label.ljust(width)}  {value}" for label, value in found]
+
+
+def render(state: ApplianceState, verbose: bool = False,
+           details: dict[str, str] | None = None) -> str:
+    """Render one appliance's state as text.
+
+    `details` are the identifiers from the local `data/appliances.json`;
+    they appear only with `verbose`, under the appliance's first line.
+    """
+    if not state.appliance.connected:
+        text = f"{state.appliance.name}  offline"
+    else:
+        renderer = RENDERERS.get(state.appliance.type, _render_generic)
+        text = renderer(state, verbose)
+
+    if not verbose:
+        return text
+    identifiers = _identifier_lines(state, details or {})
+    if not identifiers:
+        return text
+    first, *rest = text.split("\n")
+    return "\n".join([first, *identifiers, *rest])

@@ -95,6 +95,30 @@ from; set `HOMECONNECT_DATA_DIR` to keep it somewhere else. Credentials are neve
 and secret come from the environment, and the refresh token lives in the
 Keychain.
 
+### Appliance details the API does not give
+
+The API reports each appliance's model and E-number, but not its serial, FD or
+Z number, nor its software versions. The Home Connect app shows them all under
+the appliance's *Appliance information*. Copy them into `data/appliances.json`,
+keyed by the appliance's name as the app shows it:
+
+```json
+{
+  "Dishwasher": {
+    "enumber": "SMS000000/00",
+    "serial": "000000000000000000",
+    "fd": "0000",
+    "z": "00000",
+    "version": "0.0-0.0.0.0 (0.0)",
+    "sw_version": "0000000"
+  }
+}
+```
+
+Every field is optional. They then appear under each appliance in `--verbose`,
+and under `details` in `--json`. The file lives in `data/`, so it is never
+committed; if you rename an appliance in the app, rename its entry too.
+
 ## Rate limits
 
 The API allows roughly 1000 calls per day. A status command spends about three;

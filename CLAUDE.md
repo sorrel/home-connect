@@ -99,7 +99,10 @@ src/homeconnect/
                   connection itself
   store.py        append-only `events.jsonl`, `state.json`, and the advisory
                   single-instance lock, all under `data/` — anchored to the
-                  repository root, or `HOMECONNECT_DATA_DIR` if set
+                  repository root, or `HOMECONNECT_DATA_DIR` if set; also
+                  reads the hand-written, never-committed `appliances.json`
+                  of identifiers the API does not give (serial, FD, Z,
+                  versions), shown by `--verbose` and `--json`
   daemon.py       the recorder loop: seed, listen, reconcile, mark gaps;
                   the `homeconnect-recorder` console-script entry point
   report.py       turns the event log into answers (`homeconnect history`,

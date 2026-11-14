@@ -141,3 +141,51 @@ def test_verbose_shows_raw_api_keys():
     output = render(running_state(), verbose=True)
 
     assert "BSH.Common.Status.DoorState" in output
+
+
+# --- Local appliance details ------------------------------------------------
+
+DETAILS = {"serial": "000000000000000001", "fd": "0000", "z": "00000",
+           "version": "0.0-0.0.0.0 (0.0)", "sw_version": "0000000"}
+
+
+def test_verbose_shows_the_identifiers_from_the_local_file():
+    output = render(running_state(), verbose=True, details=DETAILS)
+
+    assert "Serial number" in output and "000000000000000001" in output
+    assert "FD number" in output and "Z-number" in output
+    assert "E-number" in output and "SMV6ZCX01G/40" in output
+    assert "Model" in output and "SMV6ZCX01G" in output
+    assert "0.0-0.0.0.0 (0.0)" in output and "SW version" in output
+
+
+def test_the_file_supplies_the_e_number_when_the_api_has_none():
+    from dataclasses import replace
+    state = running_state()
+    bare = replace(state, appliance=replace(state.appliance, enumber=""))
+
+    output = render(bare, verbose=True, details={"enumber": "SMV000000/00"})
+
+    assert "SMV000000/00" in output
+
+
+def test_verbose_shows_the_e_number_even_without_a_local_file():
+    output = render(running_state(), verbose=True)
+    assert "SMV6ZCX01G/40" in output
+    assert "Serial number" not in output
+
+
+def test_the_ordinary_view_never_shows_the_identifiers():
+    output = render(running_state(), details=DETAILS)
+    assert "000000000000000001" not in output
+
+
+def test_an_offline_appliance_still_shows_its_identifiers_when_verbose():
+    from dataclasses import replace
+    state = running_state()
+    offline = replace(state, appliance=replace(state.appliance, connected=False))
+
+    output = render(offline, verbose=True, details=DETAILS)
+
+    assert "offline" in output
+    assert "000000000000000001" in output

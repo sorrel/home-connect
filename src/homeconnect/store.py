@@ -58,6 +58,7 @@ DATA_DIR = default_data_dir()
 EVENTS_PATH = DATA_DIR / "events.jsonl"
 STATE_PATH = DATA_DIR / "state.json"
 LOCK_PATH = DATA_DIR / "recorder.lock"
+DETAILS_PATH = DATA_DIR / "appliances.json"
 
 
 class AlreadyRunning(Exception):
@@ -182,6 +183,36 @@ def load_state(path: Path = STATE_PATH) -> dict:
     except ValueError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def load_details(path: Path = DETAILS_PATH) -> dict[str, dict[str, str]]:
+    """Identifiers the API cannot give, keyed by lower-cased appliance name.
+
+    The serial, FD and Z numbers are shown only in the Home Connect app, so
+    they are copied by hand into `data/appliances.json`, which stays local
+    and is never committed. An absent or unreadable file means no details,
+    and anything that is not text is ignored rather than trusted.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    details: dict[str, dict[str, str]] = {}
+    for name, fields in parsed.items():
+        if isinstance(fields, dict):
+            details[str(name).lower()] = {
+                key: value for key, value in fields.items()
+                if isinstance(value, str)}
+    return details
+
+
+def details_for(details: dict[str, dict[str, str]], name: str) -> dict[str, str]:
+    """One appliance's details, matched on its name whatever the case."""
+    return details.get(name.lower(), {})
 
 
 def save_state(state: dict, path: Path = STATE_PATH) -> None:
