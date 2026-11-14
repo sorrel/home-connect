@@ -150,18 +150,14 @@ def cli(ctx, verbose: bool, as_json: bool, appliance: str | None) -> None:
         ], indent=2))
         return
 
-    # The verbose blocks are tall: a blank line before, between and after
-    # them keeps them clear of the prompt and of each other.
-    if verbose:
-        click.echo()
-    for index, state in enumerate(states):
-        if verbose and index:
-            click.echo()
-        click.echo(present.render(
-            state, verbose=verbose,
-            details=store.details_for(details, state.appliance.name)))
-    if verbose:
-        click.echo()
+    # One-liners sit together; the tall verbose blocks get a blank line
+    # between them too. Either way the display is framed by blank lines.
+    blocks = [
+        present.render(state, verbose=verbose,
+                       details=store.details_for(details, state.appliance.name))
+        for state in states
+    ]
+    click.echo(help_module.framed(("\n\n" if verbose else "\n").join(blocks)))
 
 
 @cli.command(name="auth")
@@ -172,6 +168,7 @@ def auth_command() -> None:
     credentials = _run(auth.load_credentials)
     code = _run(lambda: auth.begin_device_authorisation(credentials))
 
+    click.echo()
     click.echo(f"Visit {code.verification_uri}")
     click.echo(f"and enter the code: {code.user_code}")
     click.echo("Waiting for approval…")
@@ -189,6 +186,7 @@ def auth_command() -> None:
                 interval += 5
             continue
         click.echo("Authorised. The refresh token is stored in your Keychain.")
+        click.echo()
         return
 
     raise click.ClickException("Timed out waiting for approval.")
@@ -217,7 +215,7 @@ def history_command(as_json: bool, expanded: bool) -> None:
         }, indent=2))
         return
 
-    click.echo(report.render(records, skipped, expanded=expanded))
+    click.echo(help_module.framed(report.render(records, skipped, expanded=expanded)))
 
 
 cli.add_command(help_module.help_command, name="help")

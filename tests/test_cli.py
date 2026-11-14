@@ -489,10 +489,75 @@ def test_verbose_output_has_a_blank_line_before_and_after(monkeypatch):
     assert output.endswith("\n\n")
 
 
-def test_the_ordinary_view_has_no_extra_blank_lines(monkeypatch):
+def _framed(output: str) -> bool:
+    """True when the output has exactly one blank line above and below."""
+    return (output.startswith("\n") and not output.startswith("\n\n")
+            and output.endswith("\n\n") and not output.endswith("\n\n\n"))
+
+
+def test_the_ordinary_view_has_a_blank_line_before_and_after(monkeypatch):
     patch_backend(monkeypatch)
 
     output = CliRunner().invoke(cli_module.cli, []).output
 
-    assert not output.startswith("\n")
-    assert not output.endswith("\n\n")
+    assert _framed(output)
+
+
+def test_several_one_liners_stay_together_inside_the_frame(monkeypatch):
+    other = ApplianceState(
+        appliance=Appliance(
+            ha_id="BOSCH-TEST-0002", name="Oven", type="Oven", brand="Bosch",
+            vib="X", enumber="X/01", connected=False,
+        ),
+        status={}, programme=None,
+    )
+    patch_backend(monkeypatch, states=(STATE, other))
+
+    output = CliRunner().invoke(cli_module.cli, []).output
+
+    assert _framed(output)
+    assert output.strip("\n").count("\n") == 1
+
+
+def test_json_is_not_framed(monkeypatch):
+    patch_backend(monkeypatch)
+
+    output = CliRunner().invoke(cli_module.cli, ["--json"]).output
+
+    assert output.startswith("[")
+
+
+def test_history_is_framed(monkeypatch, tmp_path):
+    from homeconnect import store
+
+    monkeypatch.setattr(store, "EVENTS_PATH", tmp_path / "absent.jsonl")
+
+    assert _framed(CliRunner().invoke(cli_module.cli, ["history"]).output)
+
+
+def test_help_reference_is_framed():
+    assert _framed(CliRunner().invoke(cli_module.cli, ["help"]).output)
+
+
+def test_help_pages_are_framed():
+    for args in (["--help"], ["history", "-h"], ["auth", "--help"], ["help", "-h"]):
+        result = CliRunner().invoke(cli_module.cli, args)
+        assert result.exit_code == 0, args
+        assert _framed(result.output), args
+
+
+def test_errors_are_framed(monkeypatch):
+    patch_backend(monkeypatch, states=())
+
+    result = CliRunner().invoke(cli_module.cli, [])
+
+    assert result.exit_code == 1
+    assert "No matching appliances" in result.output
+    assert _framed(result.output)
+
+
+def test_unknown_command_errors_are_framed():
+    result = CliRunner().invoke(cli_module.cli, ["histroy"])
+
+    assert result.exit_code == 2
+    assert _framed(result.output)
