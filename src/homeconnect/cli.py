@@ -150,12 +150,18 @@ def cli(ctx, verbose: bool, as_json: bool, appliance: str | None) -> None:
         ], indent=2))
         return
 
+    # The verbose blocks are tall: a blank line before, between and after
+    # them keeps them clear of the prompt and of each other.
+    if verbose:
+        click.echo()
     for index, state in enumerate(states):
         if verbose and index:
-            click.echo()  # the verbose blocks are tall; keep them apart
+            click.echo()
         click.echo(present.render(
             state, verbose=verbose,
             details=store.details_for(details, state.appliance.name)))
+    if verbose:
+        click.echo()
 
 
 @cli.command(name="auth")

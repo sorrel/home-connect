@@ -478,3 +478,21 @@ def test_dash_h_works_on_a_subcommand_too():
 
     assert result.exit_code == 0
     assert "--expanded" in result.output
+
+
+def test_verbose_output_has_a_blank_line_before_and_after(monkeypatch):
+    patch_backend(monkeypatch)
+
+    output = CliRunner().invoke(cli_module.cli, ["--verbose"]).output
+
+    assert output.startswith("\n")
+    assert output.endswith("\n\n")
+
+
+def test_the_ordinary_view_has_no_extra_blank_lines(monkeypatch):
+    patch_backend(monkeypatch)
+
+    output = CliRunner().invoke(cli_module.cli, []).output
+
+    assert not output.startswith("\n")
+    assert not output.endswith("\n\n")
