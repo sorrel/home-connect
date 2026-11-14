@@ -10,6 +10,8 @@ from __future__ import annotations
 import unicodedata
 from typing import Any, Callable
 
+import click
+
 from .appliances import ApplianceState
 
 #: Human labels for the programme keys we expect to meet.
@@ -142,39 +144,125 @@ def _render_generic(state: ApplianceState, verbose: bool) -> str:
     return f"{state.appliance.name}  {operation}"
 
 
-def _render_verbose(state: ApplianceState) -> str:
-    """Every key we hold, with its raw API name, for debugging."""
-    appliance = state.appliance
-    lines = [f"{appliance.name} ({appliance.brand} {appliance.vib})"]
-
-    keys = list(state.status)
-    if state.programme is not None:
-        keys.extend(state.programme.options)
-    label_width = max([display_width(key) for key in keys] + [len("Programme")])
-
-    if state.programme is not None:
-        lines.append(f"  {'Programme'.ljust(label_width)}  {state.programme.key}")
-        for key, value in sorted(state.programme.options.items()):
-            padding = " " * (label_width - display_width(key))
-            lines.append(f"  {key}{padding}  {value}")
-
-    for key, value in sorted(state.status.items()):
-        padding = " " * (label_width - display_width(key))
-        lines.append(f"  {key}{padding}  {value}")
-
-    return "\n".join(lines)
-
-
 RENDERERS: dict[str, Callable[[ApplianceState, bool], str]] = {
     "Dishwasher": _render_dishwasher,
     "Washer": _render_washer,
 }
 
 
-def render(state: ApplianceState, verbose: bool = False) -> str:
-    """Render one appliance's state as text."""
+# --- the verbose view ------------------------------------------------------
+#
+# Styled to match `homeconnect history`, and like it, assumes a dark
+# terminal. Every width is measured on the plain text and the colour applied
+# afterwards: an ANSI escape occupies no columns, so styling first would
+# misalign every column. Raw API names stay whole, since this view exists for
+# debugging, but their vendor prefixes are dimmed so the part that varies is
+# the part the eye lands on.
+
+_NAME = dict(fg="bright_cyan", bold=True)
+_SECTION = dict(fg="bright_white", bold=True)
+_QUIET = dict(fg="bright_black")
+_TAIL = dict(fg="bright_white")
+_NUMBER = dict(fg="cyan")
+_TRUE = dict(fg="green")
+_CAVEAT = dict(fg="yellow")
+
+#: The identifiers `--verbose` shows, in order, as (label, API attribute,
+#: key in the local details file). The model sits in the heading instead; the
+#: E-number comes from the API, and the rest appear only in the Home Connect
+#: app and are copied into the file.
+_IDENTIFIERS = (
+    ("E-number", "enumber", "enumber"),
+    ("Serial number", None, "serial"),
+    ("FD number", None, "fd"),
+    ("Z-number", None, "z"),
+    ("Version", None, "version"),
+    ("SW version", None, "sw_version"),
+)
+
+
+def _dim_prefix(text: str) -> str:
+    """`BSH.Common.Status.DoorState` with everything up to the tail dimmed."""
+    prefix, dot, tail = text.rpartition(".")
+    if not dot:
+        return click.style(text, **_TAIL)
+    return click.style(prefix + dot, **_QUIET) + click.style(tail, **_TAIL)
+
+
+def _styled_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return click.style(str(value), **(_TRUE if value else _QUIET))
+    if isinstance(value, (int, float)):
+        return click.style(str(value), **_NUMBER)
+    if isinstance(value, str) and "." in value and " " not in value:
+        return _dim_prefix(value)
+    return str(value)
+
+
+def _section(title: str, rows: list[tuple[str, str]]) -> list[str]:
+    """A titled block of aligned rows; `rows` are (plain label, styled value)."""
+    if not rows:
+        return []
+    width = max(display_width(label) for label, _ in rows)
+    lines = ["", "  " + click.style(title, **_SECTION)]
+    for label, value in rows:
+        padding = " " * (width - display_width(label))
+        lines.append(f"    {label}{padding}  {value}")
+    return lines
+
+
+def _keyed_section(title: str, items: list[tuple[str, Any]]) -> list[str]:
+    """As `_section`, for raw API keys, whose prefixes are dimmed."""
+    if not items:
+        return []
+    width = max(display_width(key) for key, _ in items)
+    lines = ["", "  " + click.style(title, **_SECTION)]
+    for key, value in items:
+        padding = " " * (width - display_width(key))
+        lines.append(f"    {_dim_prefix(key)}{padding}  {_styled_value(value)}")
+    return lines
+
+
+def _render_verbose(state: ApplianceState,
+                    details: dict[str, str] | None = None) -> str:
+    """Every key we hold, with its raw API name, for debugging."""
+    appliance = state.appliance
+    heading = click.style(appliance.name, **_NAME)
+    model = " ".join(part for part in (appliance.brand, appliance.vib) if part)
+    if model:
+        heading += "  " + click.style(model, **_QUIET)
+    if not appliance.connected:
+        heading += "  " + click.style("offline", **_CAVEAT)
+    lines = [heading]
+
+    identity = []
+    for label, attribute, key in _IDENTIFIERS:
+        value = getattr(appliance, attribute) if attribute else None
+        value = value or ((details or {}).get(key) if key else None)
+        if value:
+            identity.append((label, click.style(value, **_TAIL)))
+    lines += _section("Identity", identity)
+
+    if state.programme is not None:
+        lines += _keyed_section(
+            "Programme",
+            [("Programme", state.programme.key)]
+            + sorted(state.programme.options.items()))
+
+    lines += _keyed_section("Status", sorted(state.status.items()))
+    return "\n".join(lines)
+
+
+def render(state: ApplianceState, verbose: bool = False,
+           details: dict[str, str] | None = None) -> str:
+    """Render one appliance's state as text.
+
+    `details` are the identifiers from the local `data/appliances.json`; they
+    appear only in the verbose view, which also covers an offline appliance.
+    """
+    if verbose:
+        return _render_verbose(state, details)
     if not state.appliance.connected:
         return f"{state.appliance.name}  offline"
-
     renderer = RENDERERS.get(state.appliance.type, _render_generic)
     return renderer(state, verbose)

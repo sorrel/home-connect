@@ -208,3 +208,42 @@ def test_parse_stamp_round_trips_utc_now():
 
     assert parsed is not None
     assert parsed.tzinfo is not None, "a naive stamp would compare wrongly"
+
+
+# --- Local appliance details: identifiers the API does not expose ----------
+
+def test_details_are_read_and_keyed_case_insensitively(tmp_path):
+    path = tmp_path / "appliances.json"
+    path.write_text(json.dumps(
+        {"Dishwasher": {"serial": "000000000000000001", "fd": "0000"}}))
+
+    details = store.load_details(path)
+
+    assert store.details_for(details, "dishwasher") == {
+        "serial": "000000000000000001", "fd": "0000"}
+    assert store.details_for(details, "DISHWASHER")["fd"] == "0000"
+
+
+def test_details_are_empty_when_the_file_is_absent(tmp_path):
+    assert store.load_details(tmp_path / "absent.json") == {}
+
+
+def test_unreadable_details_are_treated_as_none(tmp_path):
+    path = tmp_path / "appliances.json"
+    path.write_text("{not json")
+    assert store.load_details(path) == {}
+
+
+def test_details_for_an_unlisted_appliance_are_empty(tmp_path):
+    assert store.details_for({}, "Dishwasher") == {}
+
+
+def test_non_text_values_and_entries_are_ignored(tmp_path):
+    path = tmp_path / "appliances.json"
+    path.write_text(json.dumps(
+        {"Dishwasher": {"serial": 123, "fd": "0000"}, "Washer": "nonsense"}))
+
+    details = store.load_details(path)
+
+    assert store.details_for(details, "Dishwasher") == {"fd": "0000"}
+    assert store.details_for(details, "Washer") == {}
