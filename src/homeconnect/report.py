@@ -57,6 +57,10 @@ _DAY = 86400.0
 
 RUNNING = "Run"
 FINISHED_STATES = ("Finished", "Inactive", "Ready")
+#: States a run is suspended in, not ended: opening the door mid-wash goes
+#: `Run -> Pause -> Run`. Leaving one of these for `Run` resumes the run that
+#: is already open; it is not a new start.
+SUSPENDED_STATES = ("Pause", "ActionRequired")
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,8 @@ def cycles(records: list[dict]) -> list[Cycle]:
             continue
 
         if record.get("to") == RUNNING:
+            if label in open_cycles and record.get("from") in SUSPENDED_STATES:
+                continue
             if label in open_cycles:
                 # A new run started before the previous one was seen to end —
                 # expected after a coverage gap, not corruption. Flush the
@@ -216,9 +222,15 @@ def cycle_durations_seconds(found: list[Cycle]) -> list[float]:
     return durations
 
 
-#: The programme's short key as it appears in the log, after `daemon._tail`
-#: has reduced `Dishcare.Dishwasher.Program.MachineCare` to this.
-MACHINE_CARE_PROGRAMME = "MachineCare"
+#: Machine Care under each machine's own name, as short keys after
+#: `daemon._tail`: the dishwasher's `Dishcare.Dishwasher.Program.MachineCare`,
+#: and the washing machine's drum clean, `LaundryCare.Washer.Program.DrumClean`.
+MACHINE_CARE_PROGRAMMES = ("MachineCare", "DrumClean")
+
+
+def _machine_care_runs(found: list[Cycle]) -> list[Cycle]:
+    return sorted((c for c in found if c.programme in MACHINE_CARE_PROGRAMMES),
+                  key=lambda c: c.started)
 
 
 def last_machine_care(found: list[Cycle]) -> Cycle | None:
@@ -227,8 +239,8 @@ def last_machine_care(found: list[Cycle]) -> Cycle | None:
     Not limited to the default view's 14-day window: "how long ago" is a
     standing fact worth showing regardless of how recent it was.
     """
-    runs = [c for c in found if c.programme == MACHINE_CARE_PROGRAMME]
-    return max(runs, key=lambda c: c.started) if runs else None
+    runs = _machine_care_runs(found)
+    return runs[-1] if runs else None
 
 
 def commonest_programme(found: list[Cycle]) -> tuple[str, int] | None:
@@ -601,17 +613,26 @@ def _with_machine_care(panel: tuple[str, str, list[str], list[str]],
     if title != MACHINE_CARE_REMINDER:
         return panel
 
-    runs = sorted((c for c in found if c.programme == MACHINE_CARE_PROGRAMME),
-                  key=lambda c: c.started)
+    runs = _machine_care_runs(found)
     if not runs:
         return (title, badge, rows,
                 footer + [click.style("no machine care run recorded", **_QUIET)])
+    shown, extra = _machine_care_rows(runs, now, expanded)
+    return (title, badge, list(rows)
+            + ([click.style("machine care runs", **_QUIET)] if shown else [])
+            + shown, footer + extra)
 
+
+def _machine_care_rows(runs: list[Cycle], now: str, expanded: bool
+                       ) -> tuple[list[str], list[str]]:
+    """Rows for the Machine Care runs, and the footer naming the last one.
+
+    The default view lists only the runs inside its window; the footer says
+    when the last one was, however long ago.
+    """
     shown = runs if expanded else [
         c for c in runs if (days_since(c.started, now) or 0) <= RECENT_DAYS]
-    rows = list(rows)
-    if shown:
-        rows.append(click.style("machine care runs", **_QUIET))
+    rows = []
     for cycle in shown:
         if cycle.ended is None:
             took = "still running"
@@ -625,10 +646,66 @@ def _with_machine_care(panel: tuple[str, str, list[str], list[str]],
             if span is not None:
                 row += "   " + click.style(f"+{_number(span)} days", **_SPAN)
         rows.append(row)
-
-    footer = footer + [click.style(
+    return rows, [click.style(
         f"last machine care run {_ago(runs[-1].started, now)}", **_QUIET)]
-    return (title, badge, rows, footer)
+
+
+#: The title of the box a machine gets when it sends no Machine Care reminder.
+MACHINE_CARE_TITLE = "Machine care"
+
+#: How many washes a machine with no reminder of its own may run after its
+#: last recorded Machine Care before its box says one is due. Unofficial: the
+#: washing machine sends no reminder to relay, Bosch publishes no interval,
+#: and the only claim found (a third-party guide) is that the machine asks
+#: after about 20 washes below 40°C. Every wash is counted here, whatever its
+#: temperature, so this errs towards saying so early.
+MACHINE_CARE_DUE_WASHES = 20
+
+#: Each Machine Care programme as the machine's own panel names it.
+_MACHINE_CARE_NAMES = {"MachineCare": "Machine Care", "DrumClean": "Drum Clean"}
+
+
+def _machine_care_panel(found: list[Cycle], now: str, expanded: bool
+                        ) -> tuple[str, str, list[str], list[str]]:
+    """Machine Care runs, for a machine with no reminder box to list them in.
+
+    A washing machine sends no `MachineCareReminder`, so without this its
+    drum cleans would appear only as an ordinary line among the cycles.
+    """
+    runs = _machine_care_runs(found)
+    if not runs:
+        return (MACHINE_CARE_TITLE, _NEVER_RUN,
+                [click.style("no machine care run recorded", **_QUIET)], [])
+    shown, footer = _machine_care_rows(runs, now, expanded)
+    # "Recorded": a wash, or a Machine Care run, during a coverage gap would
+    # have gone unseen, so the log can vouch for no more than that.
+    washes = sum(1 for c in found if c.started > runs[-1].started
+                 and c.programme not in MACHINE_CARE_PROGRAMMES)
+    footer = footer + [click.style(
+        f"{washes} wash{'' if washes == 1 else 'es'} recorded since", **_QUIET)]
+    if washes >= MACHINE_CARE_DUE_WASHES:
+        name = _MACHINE_CARE_NAMES.get(runs[-1].programme, "Machine Care")
+        footer = footer + [click.style(
+            f"due: run {name} (unofficial guide: every "
+            f"{MACHINE_CARE_DUE_WASHES} washes)", **_CAVEAT)]
+    if expanded:
+        badge = _plural(len(runs), "run")
+    elif shown:
+        badge = f"{_plural(len(shown), 'run')} in {RECENT_DAYS}d"
+    else:
+        # The message goes in the body: a separator under the header with
+        # nothing above it reads as a fault.
+        return (MACHINE_CARE_TITLE, _NONE_RECENT_RUN, footer[:1], footer[1:])
+    return (MACHINE_CARE_TITLE, badge, shown, footer)
+
+
+def _with_care_box(panels: list[tuple[str, str, list[str], list[str]]],
+                   found: list[Cycle], now: str, expanded: bool
+                   ) -> list[tuple[str, str, list[str], list[str]]]:
+    """`panels`, plus a Machine care box when no reminder box lists the runs."""
+    if any(panel[0] == MACHINE_CARE_REMINDER for panel in panels):
+        return panels
+    return panels + [_machine_care_panel(found, now, expanded)]
 
 
 def _recent(stamps: list[str], now: str) -> list[str]:
@@ -672,19 +749,19 @@ def render(records: list[dict], skipped: int = 0, *,
         # dishwasher's salt alerts from the washing machine's.
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
-            sections = [(None, [_cycle_panel(found, expanded)]
-                        + [_with_machine_care(_alert_panel(alert, now), found, now,
-                                               True)
-                           for alert in every])]
+            sections = [(None, _with_care_box(
+                [_cycle_panel(found, expanded)]
+                + [_with_machine_care(_alert_panel(alert, now), found, now, True)
+                   for alert in every], found, now, True))]
         else:
             alert_groups = _group_alerts_by_label(records)
             sections = [
-                (_display_label(label),
-                 [_cycle_panel(subset, expanded,
-                              title=f"{_display_label(label)} cycles")]
-                 + [_with_machine_care(_alert_panel(alert, now), subset,
-                                       now, True)
-                    for alert in alert_groups[label]])
+                (_display_label(label), _with_care_box(
+                    [_cycle_panel(subset, expanded,
+                                  title=f"{_display_label(label)} cycles")]
+                    + [_with_machine_care(_alert_panel(alert, now), subset,
+                                          now, True)
+                       for alert in alert_groups[label]], subset, now, True))
                 for label, subset in groups.items()
             ]
         width = _box_width([panel for _, panels in sections for panel in panels])
@@ -711,19 +788,20 @@ def render(records: list[dict], skipped: int = 0, *,
 
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
-            sections = [(None, [_cycle_panel_recent(found, "Cycles", now)]
-                        + [_with_machine_care(_alert_panel_recent(alert, now),
-                                               found, now, False)
-                           for alert in every])]
+            sections = [(None, _with_care_box(
+                [_cycle_panel_recent(found, "Cycles", now)]
+                + [_with_machine_care(_alert_panel_recent(alert, now),
+                                      found, now, False)
+                   for alert in every], found, now, False))]
         else:
             alert_groups = _group_alerts_by_label(records)
             sections = [
-                (_display_label(label),
-                 [_cycle_panel_recent(subset, f"{_display_label(label)} cycles",
-                                      now)]
-                 + [_with_machine_care(_alert_panel_recent(alert, now),
-                                       subset, now, False)
-                    for alert in alert_groups[label]])
+                (_display_label(label), _with_care_box(
+                    [_cycle_panel_recent(subset,
+                                         f"{_display_label(label)} cycles", now)]
+                    + [_with_machine_care(_alert_panel_recent(alert, now),
+                                          subset, now, False)
+                       for alert in alert_groups[label]], subset, now, False))
                 for label, subset in groups.items()
             ]
         width = _box_width([panel for _, panels in sections for panel in panels])

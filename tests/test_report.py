@@ -59,6 +59,30 @@ def test_a_second_run_flushes_the_unseen_end_of_the_first():
     assert by_start["2026-08-26T09:00:00Z"].ended == "2026-08-26T10:00:00Z"
 
 
+def test_resuming_from_a_pause_continues_the_same_run():
+    """Opening the door mid-wash goes `Run -> Pause -> Run`. The resume is
+    the same run carrying on, not a new one: counting it as a start used to
+    show one wash as a phantom `still running` run plus a nameless second."""
+    def op(ts, frm, to):
+        return {"ts": ts, "ha": "washer", "key": "OperationState",
+                "from": frm, "to": to}
+    events = [
+        op("2026-11-04T14:35:33Z", "Ready", "Run"),
+        {"ts": "2026-11-04T14:35:36Z", "ha": "washer", "key": "Programme",
+         "from": None, "to": "Mix"},
+        op("2026-11-04T14:36:00Z", "Run", "Pause"),
+        op("2026-11-04T14:36:04Z", "Pause", "Run"),
+        op("2026-11-04T15:43:47Z", "Run", "Finished"),
+    ]
+
+    found = report.cycles(events)
+
+    assert len(found) == 1
+    assert found[0].started == "2026-11-04T14:35:33Z"
+    assert found[0].ended == "2026-11-04T15:43:47Z"
+    assert found[0].programme == "Mix"
+
+
 def test_an_end_with_no_preceding_start_is_not_a_phantom_cycle():
     found = report.cycles([FINISHED])
     assert found == []
@@ -304,6 +328,118 @@ def test_the_reminder_box_still_says_never_fired_beside_a_recorded_run():
     records = _care_run("2026-08-20T00:00:00Z", "2026-08-20T02:00:00Z")
     box = _panel(plain(report.render(records, now=NOW)), "MachineCareReminder")
     assert "never fired" in box.splitlines()[0]
+
+
+def _drum_clean(start: str, end: str) -> list[dict]:
+    """A washing machine's Machine Care, which it calls `DrumClean`, with the
+    i-Dos option that gives the machine away as a washer."""
+    return [
+        {"ts": start, "ha": "washer", "key": "IDos1Active",
+         "from": None, "to": True},
+        {"ts": start, "ha": "washer", "key": "OperationState",
+         "from": "Ready", "to": "Run"},
+        {"ts": start, "ha": "washer", "key": "Programme",
+         "from": None, "to": "DrumClean"},
+        {"ts": end, "ha": "washer", "key": "OperationState",
+         "from": "Run", "to": "Finished"},
+    ]
+
+
+def test_a_drum_clean_is_a_machine_care_run():
+    found = report.cycles(_drum_clean("2026-08-20T00:00:00Z",
+                                      "2026-08-20T01:08:00Z"))
+    care = report.last_machine_care(found)
+    assert care is not None
+    assert care.started == "2026-08-20T00:00:00Z"
+
+
+def test_a_machine_with_no_reminder_box_gets_a_machine_care_box_of_its_own():
+    """A washing machine sends no MachineCareReminder, so there is no reminder
+    box to list its drum cleans under — they must still be shown."""
+    records = (_drum_clean("2026-07-01T00:00:00Z", "2026-07-01T01:08:00Z")
+               + _drum_clean("2026-08-20T00:00:00Z", "2026-08-20T01:08:00Z"))
+
+    recent = _panel(plain(report.render(records, now=NOW)), "Machine care")
+    assert "2026-08-20T00:00:00Z" in recent
+    assert "1h 08m" in recent
+    assert "last machine care run 6 days ago" in recent
+    assert "2026-07-01T00:00:00Z" not in recent
+
+    full = _panel(plain(report.render(records, expanded=True, now=NOW)),
+                  "Machine care")
+    assert "2026-07-01T00:00:00Z" in full
+    assert "+50 days" in full
+    assert "2 runs" in full.splitlines()[0]
+
+
+def test_an_old_drum_clean_is_still_named_in_the_default_view():
+    records = _drum_clean("2026-07-01T00:00:00Z", "2026-07-01T01:08:00Z")
+    box = _panel(plain(report.render(records, now=NOW)), "Machine care")
+    assert "none in last 14d" in box.splitlines()[0]
+    assert "last machine care run 56 days ago" in box
+
+
+def test_a_washer_that_never_ran_machine_care_says_so():
+    records = [dict(r, ha="washer") for r in (RUN, FINISHED)] + [
+        {"ts": "2026-08-26T19:00:00Z", "ha": "washer", "key": "IDos1Active",
+         "from": None, "to": True}]
+    box = _panel(plain(report.render(records, now=NOW)), "Machine care")
+    assert "none recorded" in box.splitlines()[0]
+    assert "no machine care run recorded" in box
+
+
+def _washes(count: int) -> list[dict]:
+    """`count` ordinary washes, an hour each, one every half-day from 1 August."""
+    from datetime import datetime, timedelta
+    records = []
+    for n in range(count):
+        start = datetime(2026, 8, 1) + timedelta(hours=12 * n)
+        stamp = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        records += [
+            {"ts": stamp(start), "ha": "washer", "key": "OperationState",
+             "from": "Ready", "to": "Run"},
+            {"ts": stamp(start), "ha": "washer", "key": "Programme",
+             "from": None, "to": "Mix"},
+            {"ts": stamp(start + timedelta(hours=1)), "ha": "washer",
+             "key": "OperationState", "from": "Run", "to": "Finished"},
+        ]
+    return records
+
+
+def _care_box(records: list[dict], expanded: bool = False) -> str:
+    return _panel(plain(report.render(records, expanded=expanded, now=NOW)),
+                  "Machine care")
+
+
+def test_the_box_counts_the_washes_since_the_last_drum_clean():
+    """Washes before the drum clean, and the drum clean itself, do not count."""
+    records = (_washes(3)
+               + _drum_clean("2026-08-02T06:00:00Z", "2026-08-02T07:08:00Z")
+               + _washes(5)[9:])   # the two washes after it
+    for expanded in (False, True):
+        assert "2 washes recorded since" in _care_box(records, expanded)
+        assert "due:" not in _care_box(records, expanded)
+
+
+def test_a_drum_clean_is_due_once_enough_washes_follow_it():
+    due = report.MACHINE_CARE_DUE_WASHES
+    records = (_drum_clean("2026-07-31T00:00:00Z", "2026-07-31T01:08:00Z")
+               + _washes(due))
+    for expanded in (False, True):
+        box = _care_box(records, expanded)
+        assert f"{due} washes recorded since" in box
+        assert "due: run Drum Clean" in box
+        # The figure is not Bosch's, and the box must not pass it off as such.
+        assert "unofficial" in box
+
+    one_short = (_drum_clean("2026-07-31T00:00:00Z", "2026-07-31T01:08:00Z")
+                 + _washes(due - 1))
+    assert "due:" not in _care_box(one_short, True)
+
+
+def test_a_dishwasher_lists_machine_care_only_in_its_reminder_box():
+    records = _care_run("2026-08-20T00:00:00Z", "2026-08-20T02:00:00Z")
+    assert "┌ Machine care " not in plain(report.render(records, now=NOW))
 
 
 def test_machine_care_no_longer_has_a_line_of_its_own_below_the_boxes():
