@@ -150,7 +150,9 @@ def cli(ctx, verbose: bool, as_json: bool, appliance: str | None) -> None:
         ], indent=2))
         return
 
-    for state in states:
+    for index, state in enumerate(states):
+        if verbose and index:
+            click.echo()  # the verbose blocks are tall; keep them apart
         click.echo(present.render(
             state, verbose=verbose,
             details=store.details_for(details, state.appliance.name)))

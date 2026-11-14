@@ -1,5 +1,13 @@
 from homeconnect.appliances import Appliance, ApplianceState, Programme
-from homeconnect.present import display_width, render
+import click
+
+from homeconnect.present import display_width
+from homeconnect.present import render as _render
+
+
+def render(*args, **kwargs):
+    """Plain text: the assertions read the words, not the colour escapes."""
+    return click.unstyle(_render(*args, **kwargs))
 
 DISHWASHER = Appliance(
     ha_id="BOSCH-TEST-0001", name="Dishwasher", type="Dishwasher",
@@ -155,7 +163,7 @@ def test_verbose_shows_the_identifiers_from_the_local_file():
     assert "Serial number" in output and "000000000000000001" in output
     assert "FD number" in output and "Z-number" in output
     assert "E-number" in output and "SMV6ZCX01G/40" in output
-    assert "Model" in output and "SMV6ZCX01G" in output
+    assert output.splitlines()[0] == "Dishwasher  Bosch SMV6ZCX01G"
     assert "0.0-0.0.0.0 (0.0)" in output and "SW version" in output
 
 
@@ -189,3 +197,25 @@ def test_an_offline_appliance_still_shows_its_identifiers_when_verbose():
 
     assert "offline" in output
     assert "000000000000000001" in output
+
+
+def test_verbose_groups_fields_under_section_headings():
+    output = render(running_state(), verbose=True, details=DETAILS)
+    lines = output.splitlines()
+
+    assert [line.strip() for line in lines if line.startswith("  ")
+            and not line.startswith("    ")] == ["Identity", "Programme", "Status"]
+
+
+def test_verbose_values_line_up_within_a_section():
+    output = render(running_state(), verbose=True)
+    status = output.split("\n  Status\n")[1].splitlines()
+
+    starts = {line.index("BSH.Common.EnumType") for line in status
+              if "BSH.Common.EnumType" in line}
+    assert len(starts) == 1
+
+
+def test_verbose_dims_the_vendor_prefix_of_a_raw_key():
+    styled = _render(running_state(), verbose=True)
+    assert click.style("BSH.Common.Status.", fg="bright_black") in styled

@@ -76,6 +76,12 @@ full design record, including the live-probe findings that shaped it.
   single-process background tool — so if the recorder ever enters a restart
   loop these files will grow quickly. They are the first place to look when
   something is wrong.
+- **Terminal output is designed, never dumped.** Every change touching what
+  a person reads in the terminal must leave it looking better: headings,
+  sections, aligned columns, colour with meaning, widths measured before
+  styling. See the workspace rule in `../CLAUDE.md`; `report.py` (history)
+  and `present._render_verbose` are the reference examples. `--json` stays
+  plain.
 - **British English** throughout — code comments, variable and function
   names, CLI output, commit messages, documentation.
 - **Never commit directly to `main`.** Always work on a feature branch.
