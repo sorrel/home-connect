@@ -57,6 +57,10 @@ _DAY = 86400.0
 
 RUNNING = "Run"
 FINISHED_STATES = ("Finished", "Inactive", "Ready")
+#: States a run is suspended in, not ended: opening the door mid-wash goes
+#: `Run -> Pause -> Run`. Leaving one of these for `Run` resumes the run that
+#: is already open; it is not a new start.
+SUSPENDED_STATES = ("Pause", "ActionRequired")
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,8 @@ def cycles(records: list[dict]) -> list[Cycle]:
             continue
 
         if record.get("to") == RUNNING:
+            if label in open_cycles and record.get("from") in SUSPENDED_STATES:
+                continue
             if label in open_cycles:
                 # A new run started before the previous one was seen to end —
                 # expected after a coverage gap, not corruption. Flush the

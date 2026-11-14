@@ -59,6 +59,30 @@ def test_a_second_run_flushes_the_unseen_end_of_the_first():
     assert by_start["2026-08-26T09:00:00Z"].ended == "2026-08-26T10:00:00Z"
 
 
+def test_resuming_from_a_pause_continues_the_same_run():
+    """Opening the door mid-wash goes `Run -> Pause -> Run`. The resume is
+    the same run carrying on, not a new one: counting it as a start used to
+    show one wash as a phantom `still running` run plus a nameless second."""
+    def op(ts, frm, to):
+        return {"ts": ts, "ha": "washer", "key": "OperationState",
+                "from": frm, "to": to}
+    events = [
+        op("2026-11-04T14:35:33Z", "Ready", "Run"),
+        {"ts": "2026-11-04T14:35:36Z", "ha": "washer", "key": "Programme",
+         "from": None, "to": "Mix"},
+        op("2026-11-04T14:36:00Z", "Run", "Pause"),
+        op("2026-11-04T14:36:04Z", "Pause", "Run"),
+        op("2026-11-04T15:43:47Z", "Run", "Finished"),
+    ]
+
+    found = report.cycles(events)
+
+    assert len(found) == 1
+    assert found[0].started == "2026-11-04T14:35:33Z"
+    assert found[0].ended == "2026-11-04T15:43:47Z"
+    assert found[0].programme == "Mix"
+
+
 def test_an_end_with_no_preceding_start_is_not_a_phantom_cycle():
     found = report.cycles([FINISHED])
     assert found == []
