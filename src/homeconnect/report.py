@@ -653,10 +653,13 @@ def _machine_care_rows(runs: list[Cycle], now: str, expanded: bool
 #: The title of the box a machine gets when it sends no Machine Care reminder.
 MACHINE_CARE_TITLE = "Machine care"
 
-#: How long a machine with no reminder of its own may go without a recorded
-#: Machine Care run before its box says one is due. Our own interval, not the
-#: vendor's: a washing machine sends no reminder for this report to relay.
-MACHINE_CARE_DUE_DAYS = 60
+#: How many washes a machine with no reminder of its own may run after its
+#: last recorded Machine Care before its box says one is due. Unofficial: the
+#: washing machine sends no reminder to relay, Bosch publishes no interval,
+#: and the only claim found (a third-party guide) is that the machine asks
+#: after about 20 washes below 40°C. Every wash is counted here, whatever its
+#: temperature, so this errs towards saying so early.
+MACHINE_CARE_DUE_WASHES = 20
 
 #: Each Machine Care programme as the machine's own panel names it.
 _MACHINE_CARE_NAMES = {"MachineCare": "Machine Care", "DrumClean": "Drum Clean"}
@@ -674,14 +677,17 @@ def _machine_care_panel(found: list[Cycle], now: str, expanded: bool
         return (MACHINE_CARE_TITLE, _NEVER_RUN,
                 [click.style("no machine care run recorded", **_QUIET)], [])
     shown, footer = _machine_care_rows(runs, now, expanded)
-    since = days_since(runs[-1].started, now)
-    if since is not None and since > MACHINE_CARE_DUE_DAYS:
-        # "None recorded", not "overdue": a run during a coverage gap would
-        # have gone unseen, so the log can vouch for no more than that.
+    # "Recorded": a wash, or a Machine Care run, during a coverage gap would
+    # have gone unseen, so the log can vouch for no more than that.
+    washes = sum(1 for c in found if c.started > runs[-1].started
+                 and c.programme not in MACHINE_CARE_PROGRAMMES)
+    footer = footer + [click.style(
+        f"{washes} wash{'' if washes == 1 else 'es'} recorded since", **_QUIET)]
+    if washes >= MACHINE_CARE_DUE_WASHES:
         name = _MACHINE_CARE_NAMES.get(runs[-1].programme, "Machine Care")
         footer = footer + [click.style(
-            f"due: run {name}, none recorded in {MACHINE_CARE_DUE_DAYS} days",
-            **_CAVEAT)]
+            f"due: run {name} (unofficial guide: every "
+            f"{MACHINE_CARE_DUE_WASHES} washes)", **_CAVEAT)]
     if expanded:
         badge = _plural(len(runs), "run")
     elif shown:
