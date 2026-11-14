@@ -138,8 +138,66 @@ def render_reference(width: int = 78) -> str:
     return "\n".join(lines)
 
 
+def framed(text: str) -> str:
+    """Wrap a display in a blank line above and below.
+
+    Every human-readable display gets one, so it stands clear of the prompt
+    and of whatever was typed before it. `--json` never passes through here.
+    """
+    return f"\n{text.strip(chr(10))}\n"
+
+
+def _frame_error(exc: click.ClickException) -> None:
+    """Make an exception's own `show()` print a blank line either side.
+
+    Patched onto the instance rather than subclassed, so Click's own errors
+    (an unknown option, say) are framed just like this codebase's.
+    """
+    if getattr(exc, "_framed", False):
+        return
+    show = exc.show
+
+    def framed_show(file=None):
+        click.echo(err=True, file=file)
+        show(file)
+        click.echo(err=True, file=file)
+
+    exc.show = framed_show
+    exc._framed = True
+
+
+class FramedCommand(click.Command):
+    """A command whose `--help` page has a blank line above and below."""
+
+    def get_help(self, ctx):
+        return framed(super().get_help(ctx))
+
+
 class ColouredGroup(click.Group):
-    """A `click.Group` with coloured help output and did-you-mean suggestions."""
+    """A `click.Group` with coloured help output and did-you-mean suggestions.
+
+    Its help page and its sub-commands' are framed by blank lines, and so is
+    every error raised beneath it: both pass through here on the way out.
+    """
+
+    command_class = FramedCommand
+
+    def get_help(self, ctx):
+        return framed(super().get_help(ctx))
+
+    def make_context(self, *args, **kwargs):
+        try:
+            return super().make_context(*args, **kwargs)
+        except click.ClickException as exc:
+            _frame_error(exc)
+            raise
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except click.ClickException as exc:
+            _frame_error(exc)
+            raise
 
     def resolve_command(self, ctx, args):
         try:
@@ -258,7 +316,7 @@ class ColouredGroup(click.Group):
             )
 
 
-@click.command(name="help")
+@click.command(name="help", cls=FramedCommand)
 def help_command() -> None:
     """Show a coloured quick reference for every command."""
-    click.echo(render_reference())
+    click.echo(framed(render_reference()))
