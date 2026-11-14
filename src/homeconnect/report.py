@@ -113,7 +113,11 @@ def cycles(records: list[dict]) -> list[Cycle]:
         label = record.get("ha", "appliance")
         if record["key"] == "Programme":
             if label in open_cycles:
-                open_cycles[label]["programme"] = record.get("to")
+                # The stream clears the programme a moment before the run is
+                # seen to finish. That says the programme is over, not that
+                # the run had no name, so a clear never overwrites one.
+                if record.get("to") is not None:
+                    open_cycles[label]["programme"] = record.get("to")
             else:
                 pending[label] = (record["ts"], record.get("to"))
             continue
@@ -579,6 +583,54 @@ def _alert_panel_recent(alert: Alert, now: str
             f"in {RECENT_DAYS}d", rows, footer)
 
 
+#: The reminder whose box also lists the Machine Care runs.
+MACHINE_CARE_REMINDER = "MachineCareReminder"
+
+
+def _with_machine_care(panel: tuple[str, str, list[str], list[str]],
+                       found: list[Cycle], now: str, expanded: bool
+                       ) -> tuple[str, str, list[str], list[str]]:
+    """The Machine Care reminder's box, with the runs that answer it below.
+
+    The badge is left as the reminder's own: a run is not an arrival, and the
+    count of arrivals must not borrow from it. The default view lists only
+    the runs inside its window, as the arrivals above them are; the footer
+    says when the last one was, however long ago.
+    """
+    title, badge, rows, footer = panel
+    if title != MACHINE_CARE_REMINDER:
+        return panel
+
+    runs = sorted((c for c in found if c.programme == MACHINE_CARE_PROGRAMME),
+                  key=lambda c: c.started)
+    if not runs:
+        return (title, badge, rows,
+                footer + [click.style("no machine care run recorded", **_QUIET)])
+
+    shown = runs if expanded else [
+        c for c in runs if (days_since(c.started, now) or 0) <= RECENT_DAYS]
+    rows = list(rows)
+    if shown:
+        rows.append(click.style("machine care runs", **_QUIET))
+    for cycle in shown:
+        if cycle.ended is None:
+            took = "still running"
+        else:
+            seconds = store.elapsed_seconds(cycle.started, cycle.ended)
+            took = "?" if seconds is None else _duration(seconds)
+        row = click.style(cycle.started, **_STAMP) + "  " + took.rjust(13)
+        index = runs.index(cycle)
+        if index > 0:
+            span = days_since(runs[index - 1].started, cycle.started)
+            if span is not None:
+                row += "   " + click.style(f"+{_number(span)} days", **_SPAN)
+        rows.append(row)
+
+    footer = footer + [click.style(
+        f"last machine care run {_ago(runs[-1].started, now)}", **_QUIET)]
+    return (title, badge, rows, footer)
+
+
 def _recent(stamps: list[str], now: str) -> list[str]:
     return [s for s in stamps
             if (days_since(s, now) or 0) <= RECENT_DAYS]
@@ -621,14 +673,17 @@ def render(records: list[dict], skipped: int = 0, *,
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
             sections = [(None, [_cycle_panel(found, expanded)]
-                        + [_alert_panel(alert, now) for alert in every])]
+                        + [_with_machine_care(_alert_panel(alert, now), found, now,
+                                               True)
+                           for alert in every])]
         else:
             alert_groups = _group_alerts_by_label(records)
             sections = [
                 (_display_label(label),
                  [_cycle_panel(subset, expanded,
                               title=f"{_display_label(label)} cycles")]
-                 + [_alert_panel(alert, now)
+                 + [_with_machine_care(_alert_panel(alert, now), subset,
+                                       now, True)
                     for alert in alert_groups[label]])
                 for label, subset in groups.items()
             ]
@@ -657,14 +712,17 @@ def render(records: list[dict], skipped: int = 0, *,
         groups = _group_by_label(records, found)
         if len(groups) <= 1:
             sections = [(None, [_cycle_panel_recent(found, "Cycles", now)]
-                        + [_alert_panel_recent(alert, now) for alert in every])]
+                        + [_with_machine_care(_alert_panel_recent(alert, now),
+                                               found, now, False)
+                           for alert in every])]
         else:
             alert_groups = _group_alerts_by_label(records)
             sections = [
                 (_display_label(label),
                  [_cycle_panel_recent(subset, f"{_display_label(label)} cycles",
                                       now)]
-                 + [_alert_panel_recent(alert, now)
+                 + [_with_machine_care(_alert_panel_recent(alert, now),
+                                       subset, now, False)
                     for alert in alert_groups[label]])
                 for label, subset in groups.items()
             ]
@@ -683,14 +741,6 @@ def render(records: list[dict], skipped: int = 0, *,
         lines.append(click.style(
             "Run `homeconnect history -x` for every arrival and the intervals.",
             **_QUIET))
-
-    # --- machine care ---
-    lines.append("")
-    care = last_machine_care(found)
-    if care is not None:
-        lines.append(f"Machine care: last run {_ago(care.started, now)}")
-    else:
-        lines.append(click.style("Machine care: never recorded", **_QUIET))
 
     # --- coverage ---
     lines.append("")

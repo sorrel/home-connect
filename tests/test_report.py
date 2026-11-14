@@ -20,6 +20,16 @@ def test_a_completed_cycle_is_paired():
     assert found[0].programme == "Eco50"
 
 
+def test_the_name_cleared_as_a_run_ends_does_not_erase_it():
+    """The stream sends `Programme -> null` a moment before the run is seen
+    to finish. That says the programme is over, not that it never had a
+    name — every real run in the log ended this way and lost its name."""
+    cleared = {"ts": "2026-08-26T20:59:59Z", "ha": "dishwasher",
+               "key": "Programme", "from": "Eco50", "to": None}
+    found = report.cycles([RUN, PROG, cleared, FINISHED])
+    assert found[0].programme == "Eco50"
+
+
 def test_an_unfinished_cycle_has_no_end():
     found = report.cycles([RUN, PROG])
     assert found[0].ended is None
@@ -227,20 +237,79 @@ def test_last_machine_care_is_none_when_never_run():
     assert report.last_machine_care(found) is None
 
 
-def test_render_shows_when_machine_care_last_ran():
-    machine_care = {"ts": "2026-08-01T00:00:00Z", "ha": "dishwasher",
-                     "key": "Programme", "from": None, "to": "MachineCare"}
-    records = [dict(RUN, ts="2026-08-01T00:00:00Z"), machine_care,
-               dict(FINISHED, ts="2026-08-01T02:00:00Z")]
+def _care_run(start: str, end: str) -> list[dict]:
+    """A Machine Care run as the stream really sends it: the name arrives with
+    the start, and is cleared again just before the run is seen to finish."""
+    return [
+        {"ts": start, "ha": "dishwasher", "key": "Programme",
+         "from": None, "to": "MachineCare"},
+        {"ts": start, "ha": "dishwasher", "key": "OperationState",
+         "from": "Ready", "to": "Run"},
+        {"ts": end, "ha": "dishwasher", "key": "Programme",
+         "from": "MachineCare", "to": None},
+        {"ts": end, "ha": "dishwasher", "key": "OperationState",
+         "from": "Run", "to": "Finished"},
+    ]
 
-    text = plain(report.render(records, now=NOW))
 
-    assert "Machine care: last run 25 days ago" in text
+def _panel(text: str, title: str) -> str:
+    """The lines of one box, from its title bar to its bottom border."""
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if f"┌ {title} " in line)
+    end = next(i for i in range(start, len(lines)) if lines[i].startswith("└"))
+    return "\n".join(lines[start:end + 1])
 
 
-def test_render_says_machine_care_never_recorded_when_absent():
+def test_machine_care_runs_are_listed_in_the_reminder_box():
+    records = (_care_run("2026-08-01T00:00:00Z", "2026-08-01T02:16:00Z")
+               + _care_run("2026-08-20T00:00:00Z", "2026-08-20T02:00:00Z"))
+
+    box = _panel(plain(report.render(records, now=NOW)), "MachineCareReminder")
+
+    assert "2026-08-20T00:00:00Z" in box
+    assert "2h 00m" in box
+    assert "last machine care run 6 days ago" in box
+    # The default view keeps to its window, as the alerts above do.
+    assert "2026-08-01T00:00:00Z" not in box
+
+
+def test_the_full_record_lists_every_machine_care_run_with_its_interval():
+    records = (_care_run("2026-08-01T00:00:00Z", "2026-08-01T02:16:00Z")
+               + _care_run("2026-08-20T00:00:00Z", "2026-08-20T02:00:00Z"))
+
+    box = _panel(plain(report.render(records, expanded=True, now=NOW)),
+                 "MachineCareReminder")
+
+    assert "2026-08-01T00:00:00Z" in box
+    assert "2h 16m" in box
+    assert "+19 days" in box
+
+
+def test_a_run_never_seen_to_finish_is_shown_as_still_running():
+    records = _care_run("2026-08-20T00:00:00Z", "2026-08-20T02:00:00Z")[:2]
+
+    box = _panel(plain(report.render(records, now=NOW)), "MachineCareReminder")
+
+    assert "still running" in box
+
+
+def test_the_reminder_box_says_when_no_machine_care_run_was_recorded():
+    box = _panel(plain(report.render([RUN, FINISHED], now=NOW)),
+                 "MachineCareReminder")
+    assert "no machine care run recorded" in box
+
+
+def test_the_reminder_box_still_says_never_fired_beside_a_recorded_run():
+    """A run is not an arrival: the badge must not borrow from it."""
+    records = _care_run("2026-08-20T00:00:00Z", "2026-08-20T02:00:00Z")
+    box = _panel(plain(report.render(records, now=NOW)), "MachineCareReminder")
+    assert "never fired" in box.splitlines()[0]
+
+
+def test_machine_care_no_longer_has_a_line_of_its_own_below_the_boxes():
     text = plain(report.render([RUN, FINISHED], now=NOW))
-    assert "Machine care: never recorded" in text
+    assert "Machine care:" not in text
+
 
 # --- Alerts as arrivals, never as a current state ---------------------------
 #
