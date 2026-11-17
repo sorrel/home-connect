@@ -26,12 +26,33 @@ from typing import Any, Iterator
 #: `SelectedProgramme` is here for the same reason: the recorder polls
 #: `/programs/active`, never `/programs/selected`, so a selected programme
 #: learnt from the stream is unpollable too.
+#:
+#: The list covers every alert event the public API is known to define for
+#: these appliances, not just the ones heard so far: a rarer alert (`SaltLack`,
+#: a filter-cleaning reminder) would otherwise be logged as cleared by the
+#: first poll after it arrived. The source is the `EventKey` enum of the
+#: `aiohomeconnect` library, checked in November 2026. Carrying a key forward
+#: never hides a later arrival, because the stream itself sends the reset
+#: (`Present -> Off`) between one alert and the next.
 EVENT_ONLY_KEYS = (
+    # Dishwasher alerts.
     "SaltNearlyEmpty",
+    "SaltLack",
+    "ProgramBlockedSaltLack",
     "RinseAidNearlyEmpty",
+    "RinseAidLack",
     "MachineCareReminder",
+    "MachineCareAndFilterCleaningReminder",
+    "MachineCareAndLowMaintenanceFilterCleaningReminder",
+    "SmartFilterCleaningReminder",
+    # Washing machine alerts.
     "IDos1FillLevelPoor",
     "IDos2FillLevelPoor",
+    # Shared by every appliance type.
+    "ProgramFinished",
+    "ProgramAborted",
+    "AlarmClockElapsed",
+    # Learnt from the stream; see above.
     "SelectedProgramme",
 )
 
