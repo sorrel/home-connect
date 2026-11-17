@@ -83,6 +83,42 @@ launchd/install.sh      # install and start
 launchd/uninstall.sh    # stop and remove
 ```
 
+### Restarting it, and checking it came back
+
+The recorder loads its code once, when it starts. After pulling a change,
+restart it to pick the change up:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.homeconnect.recorder
+```
+
+Then confirm it is running, and look for a fresh `recorder starting` line:
+
+```bash
+launchctl print gui/$(id -u)/com.homeconnect.recorder | grep -E '^\s*(state|pid|last exit reason) '
+tail -n 3 data/recorder.log data/recorder.err
+```
+
+If `state = not running`, read `last exit reason`. A
+`OS_REASON_CODESIGNING` means macOS killed the new process as it started. It has
+happened once, even though both `uv` and the project's Python passed
+`codesign -v`, and starting it once more worked:
+
+```bash
+launchctl kickstart gui/$(id -u)/com.homeconnect.recorder
+```
+
+Every restart writes a `coverage_gap` record to the log. The gap runs from when
+the recorder last saved its state, not from the restart itself, so after a quiet
+spell it can be longer than the real outage. That errs on the safe side:
+`homeconnect history` counts too much time as unwatched, never too little.
+
+The restart re-reads the 1Password-mounted `.env`. With 1Password locked, the
+recorder writes a "Waiting for it" line to `recorder.err` and keeps retrying.
+When it gets in, `recorder.log` shows
+`credentials read from 1Password after waiting …`. Unlock 1Password if a restart
+seems stuck.
+
 `homeconnect history` prints the cycles observed (the ten most recent, and it
 says so when there are more), the believed state of salt, rinse aid and machine
 care, and the coverage gaps that qualify both.
