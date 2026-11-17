@@ -50,7 +50,9 @@ full design record, including the live-probe findings that shaped it.
   arrivals, are what `history -x` exists to show; this is also why the event
   log is never pruned.
 - **Some keys can only ever arrive on the stream.** `store.EVENT_ONLY_KEYS`
-  names them: the three consumables and `SelectedProgramme`. A poll cannot
+  names them: every alert event the API defines for these appliances (not
+  only those heard so far), `ProgramFinished`/`ProgramAborted`, and
+  `SelectedProgramme`. A new alert key must be added there. A poll cannot
   read any of them, so `daemon.observe()` carries them forward from
   last-known state instead of rebuilding them. Removing that carry-forward
   reintroduces the worst bug this codebase has had — an hourly poll writing

@@ -876,6 +876,73 @@ def test_a_salt_warning_survives_the_next_reconciliation_poll(tmp_path):
     ], "no phantom transition to null may be written"
 
 
+@pytest.mark.parametrize("full_key", [
+    "Dishcare.Dishwasher.Event.SaltLack",
+    "Dishcare.Dishwasher.Event.ProgramBlockedSaltLack",
+    "Dishcare.Dishwasher.Event.RinseAidLack",
+    "Dishcare.Dishwasher.Event.MachineCareAndFilterCleaningReminder",
+    "Dishcare.Dishwasher.Event.MachineCareAndLowMaintenanceFilterCleaningReminder",
+    "Dishcare.Dishwasher.Event.SmartFilterCleaningReminder",
+    "BSH.Common.Event.ProgramFinished",
+    "BSH.Common.Event.ProgramAborted",
+])
+def test_rarer_alerts_survive_the_next_reconciliation_poll(tmp_path, full_key):
+    """Every alert the API defines must be carried forward, not just the ones
+    heard so far. Missing from the list, the first one to arrive would be
+    logged as `"Present" -> null` within the hour, which looks like the
+    alert being cleared."""
+    key = store.short_key(full_key)
+    events_path = tmp_path / "events.jsonl"
+    client = _dishwasher_client()
+
+    state = daemon.observe(client)
+    daemon.apply_event(
+        state, "dishwasher",
+        [(full_key, "BSH.Common.EnumType.EventPresentState.Present")],
+        events_path, now=lambda: "2026-11-16T19:00:00Z",
+    )
+
+    observed = daemon.observe(client, previous=state)
+    daemon.record_changes(
+        state, observed, events_path, now=lambda: "2026-11-16T20:00:00Z"
+    )
+
+    records, _ = store.read_records(events_path)
+    assert [r for r in records if r.get("key") == key] == [{
+        "ts": "2026-11-16T19:00:00Z", "ha": "dishwasher", "key": key,
+        "from": None, "to": "Present",
+    }], "a poll that cannot see an alert must not record it as cleared"
+
+
+def test_a_carried_alert_still_logs_its_next_arrival(tmp_path):
+    """Carrying a key forward must not swallow a repeat: the stream resets
+    it to `Off` between arrivals, so the second `Present` is still a change."""
+    events_path = tmp_path / "events.jsonl"
+    client = _dishwasher_client()
+    stamps = iter([
+        "2026-11-16T19:00:00Z", "2026-11-16T19:01:00Z",
+        "2026-11-16T20:00:00Z", "2026-11-16T21:00:00Z",
+    ])
+    now = lambda: next(stamps)  # noqa: E731
+    present = "BSH.Common.EnumType.EventPresentState.Present"
+    off = "BSH.Common.EnumType.EventPresentState.Off"
+    key = "BSH.Common.Event.ProgramFinished"
+
+    state = daemon.observe(client)
+    daemon.apply_event(state, "dishwasher", [(key, present)], events_path, now)
+    daemon.apply_event(state, "dishwasher", [(key, off)], events_path, now)
+    daemon.record_changes(
+        state, daemon.observe(client, previous=state), events_path, now
+    )
+    daemon.apply_event(state, "dishwasher", [(key, present)], events_path, now)
+
+    records, _ = store.read_records(events_path)
+    assert [(r["from"], r["to"]) for r in records
+            if r.get("key") == "ProgramFinished"] == [
+        (None, "Present"), ("Present", "Off"), ("Off", "Present"),
+    ]
+
+
 def test_every_consumable_the_report_names_is_carried_across_a_poll():
     """The two lists must not drift apart; a missed one clears itself."""
     assert set(report.CONSUMABLE_KEYS) <= set(store.EVENT_ONLY_KEYS)
